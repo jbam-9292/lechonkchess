@@ -298,7 +298,7 @@ class VisionChessAI:
         api_key: str | None = None,
         model: str = DEFAULT_MODEL,
         fallback_model: str = FALLBACK_MODEL,
-        max_retries: int = 3,
+        max_retries: int = 5,
         backoff_base: float = 1.0,
         backoff_max: float = 30.0,
         temperature: float = 0.1,
@@ -627,7 +627,7 @@ class VisionChessAI:
                         # tokens count against max_output_tokens. 2048 left no
                         # room for the final JSON message (empty output), so
                         # use a budget that fits reasoning + message.
-                        max_output_tokens=16384,
+                        max_output_tokens=65536,
                         **request_kwargs,
                     )
 

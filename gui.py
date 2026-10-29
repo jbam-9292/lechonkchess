@@ -37,6 +37,7 @@ from chess_game import (
     STATE_FILE,
     apply_move,
     game_status,
+    get_legal_moves_san,
     is_ai_turn,
     is_game_over,
     load_state,
@@ -642,7 +643,20 @@ class ChessGUI:
                     result.taunt,
                 ))
             else:
-                self.root.after(0, lambda: self._ai_move_failed(result.error or "Unknown error"))
+                # LLM returned nothing usable after all retries: fall back to a
+                # legal move so the game never stalls (same behavior as text mode).
+                legal = get_legal_moves_san(board)
+                if legal:
+                    fallback = legal[len(legal) // 2]
+                    note = f"(fallback move — LLM error: {result.error})"
+                    self.root.after(0, lambda: self._apply_ai_move(
+                        fallback,
+                        str(shot_path) if shot_path is not None else None,
+                        note,
+                        None,
+                    ))
+                else:
+                    self.root.after(0, lambda: self._ai_move_failed(result.error or "Unknown error"))
 
         except Exception as e:
             self.root.after(0, lambda: self._ai_move_failed(str(e)))
