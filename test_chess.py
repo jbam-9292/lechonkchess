@@ -233,34 +233,58 @@ def test_ai_move_parsing() -> None:
     board = chess.Board()
 
     # Test various response formats
-    san, uci = dummy._parse_move_from_response("e4", board)
+    san, uci, _ = dummy._parse_move_from_response("e4", board)
     test("Parse 'e4'", san == "e4" and uci == "e2e4")
 
-    san, uci = dummy._parse_move_from_response("Nf3", board)
+    san, uci, _ = dummy._parse_move_from_response("Nf3", board)
     test("Parse 'Nf3'", san == "Nf3" and uci == "g1f3")
 
-    san, uci = dummy._parse_move_from_response("The best move is e4", board)
+    san, uci, _ = dummy._parse_move_from_response("The best move is e4", board)
     test("Parse 'The best move is e4'", san == "e4")
 
-    san, uci = dummy._parse_move_from_response("I play Nf3", board)
+    san, uci, _ = dummy._parse_move_from_response("I play Nf3", board)
     test("Parse 'I play Nf3'", san == "Nf3")
 
-    san, uci = dummy._parse_move_from_response("e2e4", board)
+    san, uci, _ = dummy._parse_move_from_response("e2e4", board)
     test("Parse UCI 'e2e4'", san == "e4" and uci == "e2e4")
 
-    san, uci = dummy._parse_move_from_response("g1f3", board)
+    san, uci, _ = dummy._parse_move_from_response("g1f3", board)
     test("Parse UCI 'g1f3'", san == "Nf3" and uci == "g1f3")
 
-    san, uci = dummy._parse_move_from_response("xyz invalid", board)
+    san, uci, _ = dummy._parse_move_from_response("xyz invalid", board)
     test("Reject invalid response", san is None)
 
     # Castling
     board = chess.Board("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1")
-    san, uci = dummy._parse_move_from_response("O-O", board)
+    san, uci, _ = dummy._parse_move_from_response("O-O", board)
     test("Parse castling O-O", san == "O-O" and uci == "e1g1")
 
-    san, uci = dummy._parse_move_from_response("0-0", board)
+    san, uci, _ = dummy._parse_move_from_response("0-0", board)
     test("Parse castling 0-0", san == "O-O" and uci == "e1g1")
+
+    # Structured JSON responses (move + reasoning)
+    board = chess.Board()
+    san, uci, reasoning = dummy._parse_move_from_response(
+        '{"move": "e4", "reasoning": "Controls the center."}', board
+    )
+    test("Parse JSON move", san == "e4" and uci == "e2e4")
+    test("Parse JSON reasoning", reasoning == "Controls the center.")
+
+    san, uci, reasoning = dummy._parse_move_from_response(
+        '```json\n{"move": "Nf3", "reasoning": "Develops a piece."}\n```', board
+    )
+    test("Parse fenced JSON move", san == "Nf3" and uci == "g1f3")
+    test("Parse fenced JSON reasoning", reasoning == "Develops a piece.")
+
+    san, uci, reasoning = dummy._parse_move_from_response(
+        '{"move": "e4"}', board
+    )
+    test("Parse JSON without reasoning", san == "e4" and reasoning is None)
+
+    san, uci, reasoning = dummy._parse_move_from_response(
+        '{"move": "Ke4", "reasoning": "Illegal move"}', board
+    )
+    test("Reject JSON with illegal move", san is None and uci is None)
 
 
 def main() -> None:

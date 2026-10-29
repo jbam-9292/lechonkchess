@@ -1,28 +1,25 @@
-"""Vision-based chess AI player using Mistral Large 4.
+"""Vision-based chess AI player using Mistral's Responses API.
 
-Renders the chess board as a PNG image, sends it to Mistral's vision model,
-and parses the returned move. Falls back to text-only mode if vision fails.
+Renders the chess board as a PNG image, sends it to Mistral's vision model
+via the Responses API (client.responses.create), and parses the returned
+move. Falls back to text-only mode if vision fails.
 """
 
 from __future__ import annotations
 
 import base64
-import io
 import json
 import os
 import re
 import sys
 import time
 from dataclasses import dataclass
-from pathlib import Path
 
 import chess
 from mistralai.client import Mistral
-from mistralai.client.models.systemmessage import SystemMessage
-from mistralai.client.models.usermessage import UserMessage
-from mistralai.client.models.textchunk import TextChunk
-from mistralai.client.models.imageurlchunk import ImageURLChunk
-from mistralai.client.models.imageurl import ImageURL
+from mistralai.client.models.responseseasyinputmessage import ResponsesEasyInputMessage
+from mistralai.client.models.responsesinputtext import ResponsesInputText
+from mistralai.client.models.responsesinputimage import ResponsesInputImage
 
 from board_renderer import board_to_png
 from chess_game import get_legal_moves_san, get_legal_moves_uci, parse_move
@@ -30,7 +27,7 @@ from chess_game import get_legal_moves_san, get_legal_moves_uci, parse_move
 # ── Configuration ──────────────────────────────────────────────────
 
 DEFAULT_MODEL = "mistral-large-4"  # Mistral Large 4 with vision
-FALLBACK_MODEL = "mistral-large-latest"
+FALLBACK_MODEL = "mistral-large-4"
 
 SYSTEM_PROMPT = """You are a chess grandmaster playing a game. You will be shown an image of a chess board.
 The board has coordinate labels: files (columns) are labeled a-h from left to right, and ranks (rows) are labeled 1-8 from bottom to top.
@@ -41,16 +38,39 @@ Your task:
 1. Carefully examine the board image to identify all pieces and their positions.
 2. Determine whose turn it is (stated in the title bar).
 3. Choose the best legal move for the side to move.
-4. Respond with ONLY the move in Standard Algebraic Notation (SAN), e.g. "e4", "Nf3", "O-O", "exd5", "Qxf7+".
+4. Respond with a JSON object: {"move": "<SAN>", "reasoning": "<why>"}.
 
 Rules:
-- Use standard SAN notation.
+- The "move" field holds the move in standard SAN notation, e.g. "e4", "Nf3", "O-O", "exd5", "Qxf7+".
 - For castling, use "O-O" (kingside) or "O-O-O" (queenside).
 - For pawn promotion, append "=Q", "=R", "=B", or "=N" (e.g., "e8=Q").
 - For captures, use "x" (e.g., "exd5", "Nxf7").
 - Include "+" for check and "#" for checkmate.
-- Respond with ONLY the move. No explanation, no extra text.
+- The "reasoning" field briefly explains why you chose the move (1-3 sentences).
+- Respond with ONLY the JSON object. No other text.
 """
+
+# Structured output schema: the model returns the move AND its reasoning as
+# a JSON object, so the caller always gets both (used for the GUI's
+# "AI Thinking" panel). Requested via the `text.format` parameter.
+MOVE_RESPONSE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "move": {
+            "type": "string",
+            "description": (
+                "The chosen move in Standard Algebraic Notation (SAN), "
+                'e.g. "e4", "Nf3", "O-O", "exd5", "Qxf7+", "e8=Q".'
+            ),
+        },
+        "reasoning": {
+            "type": "string",
+            "description": "Brief explanation of why this move was chosen (1-3 sentences).",
+        },
+    },
+    "required": ["move", "reasoning"],
+    "additionalProperties": False,
+}
 
 
 @dataclass
@@ -66,8 +86,39 @@ class AIMoveResult:
     reasoning: str | None = None
 
 
+def _extract_json_object(text: str) -> dict | None:
+    """Parse the first JSON object found in a response text.
+
+    Handles a raw JSON object and markdown-fenced ```json blocks.
+    Returns None if no JSON object is present.
+    """
+    text = text.strip()
+    if text.startswith("```"):
+        # Strip markdown code fences (```json ... ``` or ``` ... ```)
+        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+    # Fall back to scanning for the first {...} block in the text
+    decoder = json.JSONDecoder()
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            data, _ = decoder.raw_decode(text[i:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
 class VisionChessAI:
-    """Chess AI that uses Mistral's vision model to 'see' the board."""
+    """Chess AI that uses Mistral's Responses API to 'see' the board."""
 
     def __init__(
         self,
@@ -76,7 +127,7 @@ class VisionChessAI:
         fallback_model: str = FALLBACK_MODEL,
         max_retries: int = 3,
         temperature: float = 0.1,
-        reasoning_effort: str | None = "high",
+        reasoning_effort: str | None = None,
     ):
         self.api_key = api_key or os.environ.get("MISTRAL_API_KEY")
         if not self.api_key:
@@ -96,14 +147,19 @@ class VisionChessAI:
         b64 = base64.b64encode(png_bytes).decode("ascii")
         return f"data:image/png;base64,{b64}"
 
-    def _build_messages(
+    def _build_input(
         self,
         board: chess.Board,
         png_bytes: bytes,
         move_history: list[str] | None = None,
         use_text_fallback: bool = False,
-    ) -> list:
-        """Build the messages for the Mistral API call."""
+    ) -> str | list:
+        """Build the `input` for the Responses API call.
+
+        Returns a plain string in text-only mode, or a single user message
+        (text + image) in vision mode. The system prompt is sent separately
+        via the `instructions` parameter.
+        """
         side = "White" if board.turn == chess.WHITE else "Black"
         legal_san = get_legal_moves_san(board)
 
@@ -116,36 +172,38 @@ class VisionChessAI:
             context_parts.append(f"Move history: {' '.join(move_history[-20:])}")
         context_parts.append(f"Legal moves: {', '.join(legal_san)}")
         context_parts.append("")
-        context_parts.append(
-            "Look at the board image carefully. Identify each piece and its square. "
-            "Then choose the best move for the side to move. "
-            "Respond with ONLY the move in SAN notation."
-        )
-        context_text = "\n".join(context_parts)
-
-        system_msg = SystemMessage(content=SYSTEM_PROMPT)
 
         if use_text_fallback:
             # Text-only mode: ASCII board
+            context_parts.append(
+                "Read the board below. Choose the best move for the side to "
+                'move. Respond with a JSON object: {"move": "<SAN>", "reasoning": "<why>"}.'
+            )
+            context_text = "\n".join(context_parts)
             ascii_board = self._board_to_ascii(board)
-            context_text = (
+            return (
                 f"{context_text}\n\n"
                 f"Board (uppercase = White, lowercase = black, . = empty):\n"
                 f"{ascii_board}\n"
             )
-            return [
-                system_msg,
-                UserMessage(content=context_text),
-            ]
+
+        context_parts.append(
+            "Look at the board image carefully. Identify each piece and its square. "
+            "Then choose the best move for the side to move. "
+            'Respond with a JSON object: {"move": "<SAN>", "reasoning": "<why>"}.'
+        )
+        context_text = "\n".join(context_parts)
 
         # Vision mode: send the image
         image_url = self._encode_image(png_bytes)
         return [
-            system_msg,
-            UserMessage(content=[
-                TextChunk(text=context_text),
-                ImageURLChunk(image_url=ImageURL(url=image_url)),
-            ]),
+            ResponsesEasyInputMessage(
+                role="user",
+                content=[
+                    ResponsesInputText(text=context_text),
+                    ResponsesInputImage(image_url=image_url, detail="high"),
+                ],
+            )
         ]
 
     def _board_to_ascii(self, board: chess.Board) -> str:
@@ -162,57 +220,84 @@ class VisionChessAI:
         return "\n".join(lines)
 
     @staticmethod
-    def _extract_text(content) -> str:
-        """Extract only the final text (non-thinking) from a Mistral response.
+    def _extract_text(output) -> str:
+        """Extract the assistant's final text from a Responses API output list.
 
-        Content can be a plain string, or a list of chunks (TextChunk, ThinkChunk).
-        ThinkChunk content is excluded — use _extract_thinking for that.
+        The output list holds items of type "message" (assistant turns),
+        "reasoning", and "function_call". Only the message items' output_text
+        chunks are collected — use _extract_thinking for reasoning items.
         """
-        if content is None:
+        if output is None:
             return ""
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
+        if isinstance(output, str):
+            return output
+        if isinstance(output, list):
             parts = []
-            for chunk in content:
-                ctype = type(chunk).__name__
-                if ctype == "TextChunk" and hasattr(chunk, "text"):
-                    parts.append(chunk.text)
+            for item in output:
+                if getattr(item, "type", None) != "message":
+                    continue
+                content = getattr(item, "content", None)
+                if isinstance(content, str):
+                    parts.append(content)
+                    continue
+                for chunk in content or []:
+                    if getattr(chunk, "type", None) == "output_text" and hasattr(chunk, "text"):
+                        parts.append(chunk.text)
             return "".join(parts)
-        return str(content)
+        return str(output)
 
     @staticmethod
-    def _extract_thinking(content) -> str:
-        """Extract only the reasoning/thinking text from a Mistral response.
+    def _extract_thinking(output) -> str:
+        """Extract the reasoning text from a Responses API output list.
 
-        Returns the concatenated text from ThinkChunk entries, or empty string.
+        Reasoning items (type="reasoning") carry summary_text entries and
+        optional reasoning_text content. Returns empty string if there is none.
         """
-        if content is None:
+        if output is None:
             return ""
-        if isinstance(content, str):
+        if isinstance(output, str):
             return ""
-        if isinstance(content, list):
+        if isinstance(output, list):
             parts = []
-            for chunk in content:
-                ctype = type(chunk).__name__
-                if ctype == "ThinkChunk" and hasattr(chunk, "thinking"):
-                    for tc in chunk.thinking:
-                        if hasattr(tc, "text"):
-                            parts.append(tc.text)
+            for item in output:
+                if getattr(item, "type", None) != "reasoning":
+                    continue
+                for summary in getattr(item, "summary", None) or []:
+                    if hasattr(summary, "text"):
+                        parts.append(summary.text)
+                for chunk in getattr(item, "content", None) or []:
+                    if hasattr(chunk, "text"):
+                        parts.append(chunk.text)
             return "".join(parts)
         return ""
 
     def _parse_move_from_response(
         self, response: str, board: chess.Board
-    ) -> tuple[str | None, str | None]:
-        """Extract a legal move from the AI's text response.
+    ) -> tuple[str | None, str | None, str | None]:
+        """Extract a legal move (and reasoning, if present) from the AI's response.
 
-        Returns (san, uci) or (None, None) if no legal move found.
+        Prefers the structured JSON output {"move": ..., "reasoning": ...};
+        falls back to regex move extraction from free text. Returns
+        (san, uci, reasoning) — any missing part is None.
         """
         text = response.strip()
 
-        # Try to extract a move from the response
-        # Look for patterns like: e4, Nf3, O-O, exd5, e8=Q, Qxf7+
+        # Preferred: structured JSON response
+        data = _extract_json_object(text)
+        if data is not None:
+            move_str = data.get("move")
+            if isinstance(move_str, str) and move_str.strip():
+                move = parse_move(board, move_str.strip().replace("0", "O"))
+                if move is not None:
+                    san = board.san(move)
+                    reasoning = data.get("reasoning")
+                    if isinstance(reasoning, str) and reasoning.strip():
+                        reasoning = reasoning.strip()
+                    else:
+                        reasoning = None
+                    return san, move.uci(), reasoning
+
+        # Fallback: look for patterns like e4, Nf3, O-O, exd5, e8=Q, Qxf7+
         wb = '\\' + "b"  # word boundary
         patterns = [
             wb + "([KQRBN]?[a-h]?[1-8]?x?[a-h][1-8](?:=[QRBN])?[+#]?)" + wb,
@@ -235,9 +320,9 @@ class VisionChessAI:
             move = parse_move(board, candidate)
             if move is not None:
                 san = board.san(move)
-                return san, move.uci()
+                return san, move.uci(), None
 
-        return None, None
+        return None, None, None
 
     def get_move(
         self,
@@ -248,8 +333,9 @@ class VisionChessAI:
     ) -> AIMoveResult:
         """Get the AI's move for the given board position.
 
-        Renders the board as an image and sends it to Mistral's vision model.
-        Retries on failure, falls back to text-only mode if vision fails.
+        Renders the board as an image and sends it to Mistral's vision model
+        via the Responses API. Retries on failure, falls back to text-only
+        mode if vision fails.
         """
         # Render board image
         last_move = board.peek() if board.move_stack else None
@@ -282,38 +368,52 @@ class VisionChessAI:
                         mode = "vision" if use_vision else "text"
                         print(f"  [AI] Attempt {attempt} with {model} ({mode} mode)...", file=sys.stderr)
 
-                    messages = self._build_messages(
+                    input_items = self._build_input(
                         board, png_bytes, move_history,
                         use_text_fallback=not use_vision,
                     )
 
-                    # reasoning_effort is only accepted by Magistral reasoning
+                    # Reasoning effort is only accepted by Magistral reasoning
                     # models; sending it to others (e.g. mistral-large) is a 400.
                     request_kwargs = {}
                     if self.reasoning_effort is not None and model.startswith("magistral"):
-                        request_kwargs["reasoning_effort"] = self.reasoning_effort
+                        request_kwargs["reasoning"] = {"effort": self.reasoning_effort}
 
-                    response = self.client.chat.complete(
+                    # Structured output: the model returns the move AND its
+                    # reasoning as a JSON object, so the caller always gets both.
+                    request_kwargs["text"] = {
+                        "format": {
+                            "type": "json_schema",
+                            "name": "chess_move",
+                            "schema": MOVE_RESPONSE_SCHEMA,
+                            "strict": True,
+                        }
+                    }
+
+                    response = self.client.responses.create(
                         model=model,
-                        messages=messages,
+                        input=input_items,
+                        instructions=SYSTEM_PROMPT,
                         temperature=self.temperature,
-                        max_tokens=1024,
+                        max_output_tokens=2048,
                         **request_kwargs,
                     )
 
-                    content = response.choices[0].message.content
-                    raw_text = self._extract_text(content)
-                    thinking = self._extract_thinking(content)
+                    raw_text = self._extract_text(response.output)
+                    thinking = self._extract_thinking(response.output)
                     if verbose:
                         print(f"  [AI] Raw response: {raw_text!r}", file=sys.stderr)
                         if thinking:
                             print(f"  [AI] Thinking: {thinking[:500]}...", file=sys.stderr)
 
-                    san, uci = self._parse_move_from_response(raw_text, board)
+                    san, uci, json_reasoning = self._parse_move_from_response(raw_text, board)
 
                     if san is not None:
                         if verbose:
                             print(f"  [AI] Parsed move: {san} ({uci})", file=sys.stderr)
+                        # Prefer the reasoning from the structured JSON output;
+                        # fall back to reasoning items from the API, if any.
+                        reasoning = json_reasoning or thinking
                         return AIMoveResult(
                             move_san=san,
                             move_uci=uci,
@@ -321,7 +421,7 @@ class VisionChessAI:
                             model_used=model,
                             attempts=attempt,
                             success=True,
-                            reasoning=thinking or None,
+                            reasoning=reasoning or None,
                         )
                     else:
                         last_error = f"Could not parse move from response: {raw_text!r}"

@@ -15,6 +15,9 @@ Features:
 Usage:
     export MISTRAL_API_KEY='your-key'
     uv run python gui.py [--ai-white]
+
+Choose your color in the GUI: "Play as White" or "Play as Black".
+When you play Black the board is shown from Black's perspective.
 """
 
 from __future__ import annotations
@@ -79,6 +82,7 @@ LAST_MOVE_COLOR = MISTRAL_ORANGE     # last move highlight
 HEADER_IMAGE_SIZE = 72
 ASSET_DIR = Path(__file__).parent
 LECHONK_IMAGE_CANDIDATES = [
+    ASSET_DIR / "le-chonk-holding-rook.png",
     ASSET_DIR / "assets" / "lechonk.png",
     ASSET_DIR / "assets" / "lechonk.jpg",
     ASSET_DIR / "assets" / "lechonk.jpeg",
@@ -98,20 +102,19 @@ FILES = "abcdefgh"
 # ── GUI Application ────────────────────────────────────────────────
 
 class ChessGUI:
-    def __init__(self, root, ai_white: bool = False):
+    def __init__(self, root, human_color: str = "white"):
         import tkinter as tk
         self.tk = tk
         self.root = root
-        self.ai_white = ai_white
+        self.human_color = human_color if human_color in ("white", "black") else "white"
+        # Show the board from the human's perspective
+        self._flip_board = self.human_color == "black"
 
-        # Game state
-        if STATE_FILE.exists():
-            self.state = load_state()
-        if not hasattr(self, 'state') or self.state is None:
-            self.state = new_game(
-                white_player="ai" if ai_white else "human",
-                black_player="human" if ai_white else "ai",
-            )
+        # Game state — always start a fresh game when the GUI launches
+        self.state = new_game(
+            white_player="human" if self.human_color == "white" else "ai",
+            black_player="ai" if self.human_color == "white" else "human",
+        )
 
         # Interaction state
         self.selected_square: chess.Square | None = None
@@ -127,6 +130,7 @@ class ChessGUI:
         self._build_ui()
         self._draw_board()
         self._update_status()
+        self._update_color_label()
 
         # If AI is White, trigger AI move on start
         if is_ai_turn(self.state) and not is_game_over(self.state):
@@ -273,13 +277,28 @@ class ChessGUI:
         )
         self.ai_button.pack(anchor=tk.W, pady=(0, 10))
 
+        self._section_label(cf, "New game as:").pack(anchor=tk.W, pady=(0, 2))
+        new_game_frame = tk.Frame(cf, bg=BG_PANEL)
+        new_game_frame.pack(anchor=tk.W, pady=(0, 2))
         tk.Button(
-            cf, text="New Game", command=self._new_game,
-            font=("Helvetica", 10),
+            new_game_frame, text="White", command=lambda: self._new_game("white"),
+            font=("Helvetica", 10, "bold"),
             bg=BORDER_SUBTLE, fg=FG_TEXT,
             activebackground="#4a4a4a", activeforeground=FG_TEXT,
-            relief=tk.FLAT, padx=10, pady=3, cursor="hand2",
-        ).pack(anchor=tk.W, pady=(0, 4))
+            relief=tk.FLAT, padx=12, pady=3, cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Button(
+            new_game_frame, text="Black", command=lambda: self._new_game("black"),
+            font=("Helvetica", 10, "bold"),
+            bg=BORDER_SUBTLE, fg=FG_TEXT,
+            activebackground="#4a4a4a", activeforeground=FG_TEXT,
+            relief=tk.FLAT, padx=12, pady=3, cursor="hand2",
+        ).pack(side=tk.LEFT)
+        self.color_label = tk.Label(
+            cf, text="", font=("Helvetica", 10, "bold"),
+            bg=BG_PANEL, fg=BRIGHT_YELLOW,
+        )
+        self.color_label.pack(anchor=tk.W, pady=(0, 4))
         self._add_separator(cf)
 
         self._section_label(cf, "LLM Screenshot:").pack(anchor=tk.W)
@@ -338,6 +357,7 @@ class ChessGUI:
         return render_board_image(
             board,
             square_size=DISPLAY_SQUARE,
+            flip=self._flip_board,
             last_move=last_move,
             title=title,
         )
@@ -358,8 +378,15 @@ class ChessGUI:
         def sq_to_xy(square: chess.Square) -> tuple[int, int, int, int]:
             file_idx = chess.square_file(square)
             rank = chess.square_rank(square)  # 0-7
-            row = 7 - rank  # flip: rank 8 at top
-            x0 = DISPLAY_MARGIN + file_idx * DISPLAY_SQUARE
+            if self._flip_board:
+                # Black's perspective: rank 1 at top, file h at left
+                row = rank
+                col = 7 - file_idx
+            else:
+                # White's perspective: rank 8 at top, file a at left
+                row = 7 - rank
+                col = file_idx
+            x0 = DISPLAY_MARGIN + col * DISPLAY_SQUARE
             y0 = DISPLAY_MARGIN + DISPLAY_TITLE_HEIGHT + row * DISPLAY_SQUARE
             return x0, y0, x0 + DISPLAY_SQUARE, y0 + DISPLAY_SQUARE
 
@@ -395,10 +422,17 @@ class ChessGUI:
             return None
         col = bx // DISPLAY_SQUARE
         row = by // DISPLAY_SQUARE
-        rank = 8 - row  # flip
-        if not (0 <= col < 8 and 1 <= rank <= 8):
+        if self._flip_board:
+            # Black's perspective: rank 1 at top, file h at left
+            file_idx = 7 - col
+            rank = row + 1
+        else:
+            # White's perspective: rank 8 at top, file a at left
+            file_idx = col
+            rank = 8 - row
+        if not (0 <= file_idx < 8 and 1 <= rank <= 8):
             return None
-        return chess.square(col, rank - 1)
+        return chess.square(file_idx, rank - 1)
 
     def _on_square_click(self, event) -> None:
         if self.ai_thinking or is_game_over(self.state):
@@ -606,12 +640,19 @@ class ChessGUI:
         self.history_text.config(state=tk.DISABLED)
         self.history_text.see(tk.END)
 
-    def _new_game(self) -> None:
+    def _update_color_label(self) -> None:
+        side = "White" if self.human_color == "white" else "Black"
+        self.color_label.config(text=f"You play: {side}")
+
+    def _new_game(self, human_color: str | None = None) -> None:
+        if human_color in ("white", "black"):
+            self.human_color = human_color
+            self._flip_board = self.human_color == "black"
         if STATE_FILE.exists():
             STATE_FILE.unlink()
         self.state = new_game(
-            white_player="ai" if self.ai_white else "human",
-            black_player="human" if self.ai_white else "ai",
+            white_player="human" if self.human_color == "white" else "ai",
+            black_player="ai" if self.human_color == "white" else "human",
         )
         self.selected_square = None
         self.legal_targets = set()
@@ -621,6 +662,7 @@ class ChessGUI:
         self._set_thinking_text("")
         self._draw_board()
         self._update_status()
+        self._update_color_label()
 
         if is_ai_turn(self.state) and not is_game_over(self.state):
             self.root.after(500, self._trigger_ai_move)
@@ -630,7 +672,8 @@ def main() -> None:
     import tkinter as tk
 
     parser = argparse.ArgumentParser(description="LeChonk Chess GUI")
-    parser.add_argument("--ai-white", action="store_true", help="AI plays White")
+    parser.add_argument("--ai-white", action="store_true",
+                        help="Play as Black (AI plays White); default is playing White")
     args = parser.parse_args()
 
     if not os.environ.get("MISTRAL_API_KEY"):
@@ -639,7 +682,7 @@ def main() -> None:
         print()
 
     root = tk.Tk()
-    app = ChessGUI(root, ai_white=args.ai_white)
+    app = ChessGUI(root, human_color="black" if args.ai_white else "white")
     root.mainloop()
 
 
