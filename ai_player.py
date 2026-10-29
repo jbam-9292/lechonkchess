@@ -172,6 +172,60 @@ MOVE_RESPONSE_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Schema variant used in extrafun mode: the model must also return a "taunt".
+MOVE_RESPONSE_SCHEMA_EXTRAFUN = {
+    "type": "object",
+    "properties": {
+        "move": MOVE_RESPONSE_SCHEMA["properties"]["move"],
+        "reasoning": MOVE_RESPONSE_SCHEMA["properties"]["reasoning"],
+        "taunt": {
+            "type": "string",
+            "description": (
+                "A short (max 12 words) savage one-liner trashing the opponent, "
+                "in the voice of Le Chonk the chonky cat. Aggressive and "
+                "cat-themed (claws, hissing, pouncing). Playful trash-talk, never cruel."
+            ),
+        },
+    },
+    "required": ["move", "reasoning", "taunt"],
+    "additionalProperties": False,
+}
+
+# Appended to the system prompt when extrafun mode is on.
+EXTRA_FUN_INSTRUCTIONS = """
+
+EXTRA FUN MODE: You are Le Chonk, a smug, chonky, trash-talking chess cat. Besides
+the move and reasoning, your JSON response must include a "taunt" field: a short
+(max 12 words) savage one-liner mocking your opponent — aggressive, cat-themed
+(claws, hisses, pounces), like you're about to strike. Keep it playful
+trash-talk, never genuinely cruel or offensive.
+"""
+
+# Used when the model returns no usable taunt, so the fun never breaks.
+FALLBACK_TAUNTS = [
+    "Pathetic. My claws are sharper than your strategy.",
+    "Hiss. Le Chonk has nine lives. Your position has none.",
+    "I've buried better moves in the litter box.",
+    "That blunder? I'd pounce on it, but it's already dead.",
+    "Prepare to be swatted off the board, human.",
+    "My tail flicks with contempt. And intent to harm.",
+    "You call that chess? I call it a hairball.",
+    "Le Chonk sees everything. Especially your weakness.",
+]
+
+
+def format_taunt_bubble(text: str, max_width: int = 56) -> str:
+    """Format a taunt as an ASCII speech bubble for terminal output."""
+    text = " ".join(text.split())
+    if len(text) > max_width:
+        text = text[: max_width - 3].rstrip() + "..."
+    width = len(text) + 2
+    top = "  ." + "-" * width + "."
+    mid = f"  | {text} |"
+    bot = "  '" + "-" * width + "'"
+    tail = "     \\_"
+    return "\n".join([top, mid, bot, tail])
+
 
 @dataclass
 class AIMoveResult:
@@ -184,6 +238,7 @@ class AIMoveResult:
     success: bool
     error: str | None = None
     reasoning: str | None = None
+    taunt: str | None = None
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -231,6 +286,9 @@ class VisionChessAI:
     # Default mode for this class; subclasses override via default_mode.
     default_mode = "hybrid"
 
+    # Class-level default so instances created without __init__ still work.
+    extrafun: bool = False
+
     # Sent as the `instructions` parameter; set per-instance from the mode
     # in __init__, subclasses may also override at class level.
     system_prompt: str = HYBRID_SYSTEM_PROMPT
@@ -246,11 +304,14 @@ class VisionChessAI:
         temperature: float = 0.1,
         reasoning_effort: str | None = "low",
         mode: str | None = None,
+        extrafun: bool = False,
     ):
         self.mode = mode or self.default_mode
         if self.mode not in MODES:
             raise ValueError(f"mode must be one of {MODES}, got {self.mode!r}")
         self.system_prompt = MODE_SYSTEM_PROMPTS[self.mode]
+        # When True, the model also returns a playful "taunt" line per move
+        self.extrafun = extrafun
         self.api_key = api_key or os.environ.get("MISTRAL_API_KEY")
         if not self.api_key:
             raise ValueError(
@@ -354,6 +415,12 @@ class VisionChessAI:
                 "Read the board text and FEN carefully. Identify each piece and its "
                 "square. Then choose the best legal move for the side to move. "
                 'Respond with a JSON object: {"move": "<SAN>", "reasoning": "<why>"}.'
+            )
+        if getattr(self, "extrafun", False):
+            context_parts.append(
+                'In extrafun mode your JSON must also include a "taunt" field: a '
+                "short (max 12 words), aggressive, cat-themed one-liner trashing "
+                "your opponent."
             )
         context_text = "\n".join(context_parts)
 
@@ -532,21 +599,35 @@ class VisionChessAI:
 
                     # Structured output: the model returns the move AND its
                     # reasoning as a JSON object, so the caller always gets both.
+                    # In extrafun mode the schema also requires a "taunt" field.
+                    schema = (
+                        MOVE_RESPONSE_SCHEMA_EXTRAFUN
+                        if getattr(self, "extrafun", False)
+                        else MOVE_RESPONSE_SCHEMA
+                    )
                     request_kwargs["text"] = {
                         "format": {
                             "type": "json_schema",
                             "name": "chess_move",
-                            "schema": MOVE_RESPONSE_SCHEMA,
+                            "schema": schema,
                             "strict": True,
                         }
                     }
 
+                    instructions = self.system_prompt
+                    if getattr(self, "extrafun", False):
+                        instructions = self.system_prompt + EXTRA_FUN_INSTRUCTIONS
+
                     response = self.client.responses.create(
                         model=model,
                         input=input_items,
-                        instructions=self.system_prompt,
+                        instructions=instructions,
                         temperature=self.temperature,
-                        max_output_tokens=2048,
+                        # mistral-large-4 is a reasoning model: its reasoning
+                        # tokens count against max_output_tokens. 2048 left no
+                        # room for the final JSON message (empty output), so
+                        # use a budget that fits reasoning + message.
+                        max_output_tokens=16384,
                         **request_kwargs,
                     )
 
@@ -565,6 +646,15 @@ class VisionChessAI:
                         # Prefer the reasoning from the structured JSON output;
                         # fall back to reasoning items from the API, if any.
                         reasoning = json_reasoning or thinking
+                        taunt = None
+                        if getattr(self, "extrafun", False):
+                            data = _extract_json_object(raw_text)
+                            if data is not None:
+                                t = data.get("taunt")
+                                if isinstance(t, str) and t.strip():
+                                    taunt = " ".join(t.split())
+                            if not taunt:
+                                taunt = random.choice(FALLBACK_TAUNTS)
                         return AIMoveResult(
                             move_san=san,
                             move_uci=uci,
@@ -573,6 +663,7 @@ class VisionChessAI:
                             attempts=attempt,
                             success=True,
                             reasoning=reasoning or None,
+                            taunt=taunt,
                         )
                     else:
                         last_error = f"Could not parse move from response: {raw_text!r}"

@@ -20,7 +20,7 @@ import sys
 
 import chess
 
-from ai_player import VisionChessAI
+from ai_player import VisionChessAI, format_taunt_bubble
 from board_renderer import board_to_png, save_board_image
 from chess_game import (
     STATE_FILE,
@@ -59,6 +59,7 @@ def main() -> None:
                         help="Mistral vision model (default: mistral-large-4)")
     parser.add_argument("--ai-vs-ai", action="store_true", help="AI vs AI demo")
     parser.add_argument("--max-moves", type=int, default=200, help="Max half-moves in AI vs AI mode")
+    parser.add_argument("--extrafun", action="store_true", help="Enable extra fun (shh...)")
     args = parser.parse_args()
 
     # Check API key
@@ -89,7 +90,7 @@ def main() -> None:
     print()
 
     # Create AI player
-    ai = VisionChessAI(api_key=api_key, model=args.model)
+    ai = VisionChessAI(api_key=api_key, model=args.model, extrafun=args.extrafun)
 
     # Load or create game
     if args.new or not STATE_FILE.exists():
@@ -180,6 +181,8 @@ def main() -> None:
 
             if result.success and result.move_san:
                 print(f"  AI sees the board and plays: {result.move_san}")
+                if args.extrafun and result.taunt:
+                    print(format_taunt_bubble(result.taunt))
                 success, msg, _ = apply_move(state, result.move_san)
                 if success:
                     # Persist the AI's reasoning so it can plan across moves

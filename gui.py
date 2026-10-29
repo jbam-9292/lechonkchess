@@ -16,7 +16,7 @@ Features:
 
 Usage:
     export MISTRAL_API_KEY='your-key'
-    uv run python gui.py [--ai-white] [--mode {text,hybrid,image}]
+    uv run python gui.py [--ai-white] [--mode {text,hybrid,image}] [--extrafun]
 
 Choose your color in the GUI: "Play as White" or "Play as Black".
 When you play Black the board is shown from Black's perspective.
@@ -120,13 +120,17 @@ MODE_THINKING_TEXT = {
 # ── GUI Application ────────────────────────────────────────────────
 
 class ChessGUI:
-    def __init__(self, root, human_color: str = "white", ai_mode: str = "hybrid"):
+    def __init__(self, root, human_color: str = "white", ai_mode: str = "hybrid",
+                 extrafun: bool = False):
         import tkinter as tk
         self.tk = tk
         self.root = root
         self.human_color = human_color if human_color in ("white", "black") else "white"
         # LLM input mode: "text", "image" or "hybrid" (slider-controlled)
         self.ai_mode = ai_mode if ai_mode in MODE_LABELS else "hybrid"
+        # Extra fun: the AI pops up trash-talk speech bubbles after its moves
+        self.extrafun = extrafun
+        self._bubble_after_id = None  # after() id of the visible speech bubble, if any
         # Show the board from the human's perspective
         self._flip_board = self.human_color == "black"
 
@@ -160,7 +164,9 @@ class ChessGUI:
     def _build_header(self) -> None:
         """Header bar with the Le Chonk portrait and title, plus brand stripe."""
         tk = self.tk
-        header = tk.Frame(self.root, bg=HEADER_BG, padx=14, pady=10)
+        # pady=0 so the taunt bubble canvas can span the header's full height;
+        # the portrait and titles carry their own vertical padding instead.
+        header = tk.Frame(self.root, bg=HEADER_BG, padx=14, pady=0)
         header.pack(fill=tk.X)
 
         photo, path = self._load_lechonk_photo(HEADER_IMAGE_SIZE)
@@ -170,22 +176,11 @@ class ChessGUI:
                 header, image=photo, bg=HEADER_BG,
                 highlightthickness=2, highlightbackground=MISTRAL_ORANGE,
             )
-            portrait.pack(side=tk.LEFT)
+            portrait.pack(side=tk.LEFT, pady=10)
             self._set_window_icon(path)
-        else:
-            # Placeholder monogram until the Le Chonk picture is added to the repo
-            placeholder = tk.Canvas(
-                header, width=HEADER_IMAGE_SIZE, height=HEADER_IMAGE_SIZE,
-                bg=MISTRAL_ORANGE, highlightthickness=2, highlightbackground=ORANGE_DEEP,
-            )
-            placeholder.create_text(
-                HEADER_IMAGE_SIZE // 2, HEADER_IMAGE_SIZE // 2,
-                text="LC", font=("Helvetica", 26, "bold"), fill=MISTRAL_BLACK,
-            )
-            placeholder.pack(side=tk.LEFT)
 
         titles = tk.Frame(header, bg=HEADER_BG)
-        titles.pack(side=tk.LEFT, padx=(14, 0))
+        titles.pack(side=tk.LEFT, padx=(14, 0), pady=10)
         tk.Label(
             titles, text="LeChonk Chess", font=("Helvetica", 22, "bold"),
             bg=HEADER_BG, fg=BRIGHT_YELLOW,
@@ -195,6 +190,15 @@ class ChessGUI:
             font=("Helvetica", 11), bg=HEADER_BG, fg=FG_MUTED,
         )
         self.subtitle_label.pack(anchor=tk.W)
+
+        # Taunt bubble lives in the top bar: an overlay canvas just right of
+        # the title block, stretched to the header's full height, where the
+        # AI's trash talk pops up. Packed only while visible (see
+        # _show_speech_bubble).
+        self.bubble_canvas = tk.Canvas(
+            header, width=300, height=100, bg=HEADER_BG,
+            highlightthickness=0,
+        )
 
         # Mistral brand stripe under the header
         tk.Frame(self.root, bg=MISTRAL_ORANGE, height=3).pack(fill=tk.X)
@@ -593,6 +597,7 @@ class ChessGUI:
         self.ai_button.config(state=self.tk.DISABLED)
         self.thinking_label.config(text=MODE_THINKING_TEXT[self.ai_mode])
         self._set_thinking_text("")
+        self._hide_speech_bubble()
         self.root.update()
 
         thread = threading.Thread(target=self._ai_move_worker, daemon=True)
@@ -620,7 +625,8 @@ class ChessGUI:
 
             # Call the LLM in the selected input mode (memory for cross-move planning)
             api_key = os.environ.get("MISTRAL_API_KEY")
-            ai = VisionChessAI(api_key=api_key, model="mistral-large-4", mode=mode)
+            ai = VisionChessAI(api_key=api_key, model="mistral-large-4", mode=mode,
+                               extrafun=self.extrafun)
             result = ai.get_move(
                 board,
                 move_history=self.state.history,
@@ -633,6 +639,7 @@ class ChessGUI:
                     result.move_san,
                     str(shot_path) if shot_path is not None else None,
                     result.reasoning,
+                    result.taunt,
                 ))
             else:
                 self.root.after(0, lambda: self._ai_move_failed(result.error or "Unknown error"))
@@ -640,7 +647,8 @@ class ChessGUI:
         except Exception as e:
             self.root.after(0, lambda: self._ai_move_failed(str(e)))
 
-    def _apply_ai_move(self, move_san: str, screenshot_path: str | None, reasoning: str | None = None) -> None:
+    def _apply_ai_move(self, move_san: str, screenshot_path: str | None,
+                       reasoning: str | None = None, taunt: str | None = None) -> None:
         apply_move(self.state, move_san)
         self.state = load_state() or self.state
 
@@ -669,6 +677,9 @@ class ChessGUI:
         self._draw_board()
         self._update_status()
 
+        if self.extrafun and taunt:
+            self._show_speech_bubble(taunt)
+
         if is_game_over(self.state):
             board = self.state.to_board()
             self.thinking_label.config(text=f"GAME OVER: {game_status(board)}", fg=MISTRAL_ORANGE)
@@ -678,6 +689,77 @@ class ChessGUI:
         self.ai_button.config(state=self.tk.NORMAL)
         self.thinking_label.config(text=f"AI Error: {error[:80]}", fg=MISTRAL_ORANGE)
         self._set_thinking_text(f"Error: {error}")
+
+    def _show_speech_bubble(self, text: str, hold_ms: int = 10000) -> None:
+        """Draw a comic-style speech bubble in the top bar (header).
+
+        The bubble is a small overlay canvas on the right side of the header
+        (not a popout Toplevel), so window captures like OBS pick it up. It
+        pops in with a short scale animation, holds for ``hold_ms``, then
+        disappears.
+        """
+        tk = self.tk
+        self._hide_speech_bubble()
+
+        text = " ".join(text.split())
+        if len(text) > 90:
+            text = text[:87].rstrip() + "..."
+
+        cv = self.bubble_canvas
+        # Packed left-of-center in the header (right after the title block)
+        # and stretched to the header's full height.
+        cv.pack(side=tk.LEFT, padx=(20, 0), fill=tk.Y)
+
+        # Bubble fills the whole canvas; tail points left toward the Le Chonk
+        # portrait on the left side of the header.
+        x0, y0 = 20, 2
+        bw_full, bh_full = 280, 96
+
+        def draw(scale: float) -> None:
+            cv.delete("speechbubble")
+            bw = int(bw_full * scale)
+            bh = int(bh_full * scale)
+            cy = y0 + (bh_full - bh) // 2  # pop grows from the vertical center
+            cv.create_polygon(
+                x0, cy + int(28 * scale), x0, cy + int(60 * scale),
+                x0 - int(16 * scale), cy + int(44 * scale),
+                fill=WARM_CREAM, outline=MISTRAL_BLACK, width=2,
+                tags="speechbubble",
+            )
+            cv.create_rectangle(
+                x0, cy, x0 + bw, cy + bh,
+                fill=WARM_CREAM, outline=MISTRAL_BLACK, width=2,
+                tags="speechbubble",
+            )
+            cv.create_text(
+                x0 + 12, cy + max(8, int(10 * scale)), text=text, anchor=tk.NW,
+                width=bw - 24,
+                font=("Helvetica", 12, "bold"), fill=MISTRAL_BLACK,
+                justify=tk.LEFT, tags="speechbubble",
+            )
+
+        def pop(step: int) -> None:
+            scales = (0.55, 0.75, 0.9, 1.0)
+            if step < len(scales):
+                draw(scales[step])
+                self._bubble_after_id = self.root.after(40, lambda: pop(step + 1))
+            else:
+                draw(1.0)
+                self._bubble_after_id = self.root.after(hold_ms, self._hide_speech_bubble)
+
+        pop(0)
+
+    def _hide_speech_bubble(self) -> None:
+        """Remove the header speech bubble and cancel its timers."""
+        after_id = getattr(self, "_bubble_after_id", None)
+        if after_id is not None:
+            try:
+                self.root.after_cancel(after_id)
+            except Exception:
+                pass
+            self._bubble_after_id = None
+        self.bubble_canvas.delete("speechbubble")
+        self.bubble_canvas.pack_forget()
 
     def _set_thinking_text(self, text: str) -> None:
         """Update the AI thinking panel with new text."""
@@ -747,6 +829,7 @@ class ChessGUI:
         )
         self.selected_square = None
         self.legal_targets = set()
+        self._hide_speech_bubble()
         self.shot_canvas.delete("all")
         self.shot_label.config(text="(not yet generated)", fg=FG_MUTED)
         self.thinking_label.config(text="")
@@ -768,6 +851,8 @@ def main() -> None:
     parser.add_argument("--mode", choices=SLIDER_MODES, default="hybrid",
                         help="LLM input mode at startup (default: hybrid); "
                              "can be changed anytime with the slider")
+    parser.add_argument("--extrafun", action="store_true",
+                        help="Enable extra fun (shh...)")
     args = parser.parse_args()
 
     if not os.environ.get("MISTRAL_API_KEY"):
@@ -776,7 +861,8 @@ def main() -> None:
         print()
 
     root = tk.Tk()
-    app = ChessGUI(root, human_color="black" if args.ai_white else "white", ai_mode=args.mode)
+    app = ChessGUI(root, human_color="black" if args.ai_white else "white",
+                   ai_mode=args.mode, extrafun=args.extrafun)
     root.mainloop()
 
 

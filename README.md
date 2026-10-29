@@ -31,6 +31,8 @@ can even watch two instances of the AI play each other.
 You play as either color. The same engine also supports a **text-only mode**
 (the board is described as text instead of an image) and a **hybrid mode**
 (image + text), so you can compare how the model plays with and without vision.
+The LLM is strongest in the hybrid mode, where it gets both the image and the
+text description of the board.
 
 ## Ways to play
 
@@ -41,9 +43,13 @@ You play as either color. The same engine also supports a **text-only mode**
 | Text CLI | `uv run python text_game.py --new` | Human vs AI, text-only board (no images) |
 | AI vs AI | `... --ai-vs-ai` | Watch Mistral Large 4 play against itself |
 | Play as Black | add `--ai-white` | The AI takes White, you take Black |
+| Extra fun | add `--extrafun` to any command | ??? |
 
 The GUI also lets you switch the LLM input mode (text / image / hybrid) with a
 slider and enter moves either by clicking squares or by typing SAN/UCI notation.
+
+Psst — the `--extrafun` flag works everywhere, including `uv run python gui.py --extrafun`.
+Run it and find out what it does.
 
 ## Requirements
 
