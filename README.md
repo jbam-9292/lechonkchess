@@ -10,15 +10,6 @@ can even watch two instances of the AI play each other.
 ## Screenshots
 
 ![screenshot](screenshot_1.png)
-
-[screenshot]
-
-[screenshot]
-
-## Video
-
-[video]
-
 ## How it works
 
 1. The current chess position is rendered as a PNG image of the board.
