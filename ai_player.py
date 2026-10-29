@@ -76,7 +76,7 @@ class VisionChessAI:
         fallback_model: str = FALLBACK_MODEL,
         max_retries: int = 3,
         temperature: float = 0.1,
-        reasoning_effort: str | None = "max",
+        reasoning_effort: str | None = "high",
     ):
         self.api_key = api_key or os.environ.get("MISTRAL_API_KEY")
         if not self.api_key:

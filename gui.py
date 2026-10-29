@@ -44,7 +44,7 @@ from board_renderer import board_to_png, save_board_image
 
 # Board display size in the GUI
 DISPLAY_SQUARE = 70
-DISPLAY_MARGIN = 40
+DISPLAY_MARGIN = 30  # must match margin in board_renderer.render_board_image
 DISPLAY_TITLE_HEIGHT = 40
 DISPLAY_BOARD_PX = DISPLAY_SQUARE * 8
 DISPLAY_TOTAL = DISPLAY_BOARD_PX + DISPLAY_MARGIN * 2 + DISPLAY_TITLE_HEIGHT
@@ -52,10 +52,44 @@ DISPLAY_TOTAL = DISPLAY_BOARD_PX + DISPLAY_MARGIN * 2 + DISPLAY_TITLE_HEIGHT
 # Screenshot size for the LLM (higher res = better vision)
 SCREENSHOT_SQUARE = 80
 
-# Highlight colors (RGBA overlays on the canvas, drawn over the image)
-SELECTED_COLOR = "#FFD700"       # gold
-LEGAL_DOT_COLOR = "#32CD32"      # lime green
-LAST_MOVE_COLOR = "#FFA500"      # orange
+# ── Mistral brand palette ──────────────────────────────────────────
+
+MISTRAL_ORANGE = "#fa520f"     # Mistral Orange — primary accent
+ORANGE_DEEP = "#cc3a05"        # Orange Deep — pressed/active states
+SUNSHINE_GOLD = "#ffa110"      # Sunshine Gold — secondary accent
+BRIGHT_YELLOW = "#ffd900"      # Bright Yellow — highlights
+WARM_CREAM = "#fff8e0"         # Warm Cream — main text
+MISTRAL_BLACK = "#1f1f1f"      # Mistral Black — window background
+
+# Semantic aliases
+BG_ROOT = MISTRAL_BLACK        # window background
+HEADER_BG = "#141414"          # header bar (near-black)
+BG_PANEL = "#2a2a2a"           # side panel card
+BG_ENTRY = "#141414"           # text inputs
+FG_TEXT = WARM_CREAM           # main text
+FG_MUTED = "#b5ab93"           # secondary labels
+BORDER_SUBTLE = "#3a3a3a"      # card borders / separators
+
+# Highlight colors (canvas overlays drawn over the board image)
+SELECTED_COLOR = BRIGHT_YELLOW       # selected square
+LEGAL_DOT_COLOR = SUNSHINE_GOLD      # legal move dots
+LAST_MOVE_COLOR = MISTRAL_ORANGE     # last move highlight
+
+# Le Chonk portrait shown in the header (first existing file wins)
+HEADER_IMAGE_SIZE = 72
+ASSET_DIR = Path(__file__).parent
+LECHONK_IMAGE_CANDIDATES = [
+    ASSET_DIR / "assets" / "lechonk.png",
+    ASSET_DIR / "assets" / "lechonk.jpg",
+    ASSET_DIR / "assets" / "lechonk.jpeg",
+    ASSET_DIR / "assets" / "lechonk.gif",
+    ASSET_DIR / "assets" / "lechonk.webp",
+    ASSET_DIR / "lechonk.png",
+    ASSET_DIR / "lechonk.jpg",
+    ASSET_DIR / "lechonk.jpeg",
+    ASSET_DIR / "lechonk.gif",
+    ASSET_DIR / "lechonk.webp",
+]
 
 SCREENSHOT_DIR = Path(__file__).parent / "board_images"
 FILES = "abcdefgh"
@@ -87,6 +121,7 @@ class ChessGUI:
 
         # Setup window
         self.root.title("LeChonk Chess — Mistral Large 4 (Vision)")
+        self.root.configure(bg=BG_ROOT)
         self.root.resizable(False, False)
 
         self._build_ui()
@@ -97,72 +132,197 @@ class ChessGUI:
         if is_ai_turn(self.state) and not is_game_over(self.state):
             self.root.after(500, self._trigger_ai_move)
 
+    def _build_header(self) -> None:
+        """Header bar with the Le Chonk portrait and title, plus brand stripe."""
+        tk = self.tk
+        header = tk.Frame(self.root, bg=HEADER_BG, padx=14, pady=10)
+        header.pack(fill=tk.X)
+
+        photo, path = self._load_lechonk_photo(HEADER_IMAGE_SIZE)
+        if photo is not None:
+            self._lechonk_photo = photo  # keep reference to prevent GC
+            portrait = tk.Label(
+                header, image=photo, bg=HEADER_BG,
+                highlightthickness=2, highlightbackground=MISTRAL_ORANGE,
+            )
+            portrait.pack(side=tk.LEFT)
+            self._set_window_icon(path)
+        else:
+            # Placeholder monogram until the Le Chonk picture is added to the repo
+            placeholder = tk.Canvas(
+                header, width=HEADER_IMAGE_SIZE, height=HEADER_IMAGE_SIZE,
+                bg=MISTRAL_ORANGE, highlightthickness=2, highlightbackground=ORANGE_DEEP,
+            )
+            placeholder.create_text(
+                HEADER_IMAGE_SIZE // 2, HEADER_IMAGE_SIZE // 2,
+                text="LC", font=("Helvetica", 26, "bold"), fill=MISTRAL_BLACK,
+            )
+            placeholder.pack(side=tk.LEFT)
+
+        titles = tk.Frame(header, bg=HEADER_BG)
+        titles.pack(side=tk.LEFT, padx=(14, 0))
+        tk.Label(
+            titles, text="LeChonk Chess", font=("Helvetica", 22, "bold"),
+            bg=HEADER_BG, fg=BRIGHT_YELLOW,
+        ).pack(anchor=tk.W)
+        tk.Label(
+            titles, text="Human vs Mistral Large 4 (Vision)",
+            font=("Helvetica", 11), bg=HEADER_BG, fg=FG_MUTED,
+        ).pack(anchor=tk.W)
+
+        # Mistral brand stripe under the header
+        tk.Frame(self.root, bg=MISTRAL_ORANGE, height=3).pack(fill=tk.X)
+
+    def _load_lechonk_photo(self, size: int):
+        """Load the Le Chonk picture as a PhotoImage.
+
+        Returns (photo, source_path), or (None, None) if no image is found.
+        """
+        for path in LECHONK_IMAGE_CANDIDATES:
+            if not path.exists():
+                continue
+            try:
+                img = Image.open(path).convert("RGBA")
+                img.thumbnail((size, size))
+                return ImageTk.PhotoImage(img), path
+            except Exception:
+                continue
+        return None, None
+
+    def _set_window_icon(self, path: Path) -> None:
+        try:
+            img = Image.open(path).convert("RGBA")
+            img.thumbnail((48, 48))
+            self._icon_photo = ImageTk.PhotoImage(img)  # keep reference
+            self.root.iconphoto(True, self._icon_photo)
+        except Exception:
+            pass
+
+    def _add_separator(self, parent) -> None:
+        self.tk.Frame(parent, bg=BORDER_SUBTLE, height=1).pack(fill=self.tk.X, pady=8)
+
+    def _section_label(self, parent, text: str):
+        return self.tk.Label(
+            parent, text=text, font=("Helvetica", 10, "bold"),
+            bg=BG_PANEL, fg=SUNSHINE_GOLD,
+        )
+
     def _build_ui(self) -> None:
         tk = self.tk
-        main = tk.Frame(self.root, padx=10, pady=10)
-        main.pack()
+
+        self._build_header()
+
+        main = tk.Frame(self.root, bg=BG_ROOT, padx=14, pady=14)
+        main.pack(fill=tk.BOTH, expand=True)
 
         # Left: board canvas
-        board_frame = tk.Frame(main)
-        board_frame.pack(side=tk.LEFT, padx=(0, 10))
+        board_frame = tk.Frame(main, bg=BG_ROOT)
+        board_frame.pack(side=tk.LEFT, padx=(0, 14))
 
         self.canvas = tk.Canvas(
             board_frame,
             width=DISPLAY_TOTAL,
             height=DISPLAY_TOTAL,
-            bg="#3C3226",
-            highlightthickness=0,
+            bg=BG_ENTRY,
+            highlightthickness=1,
+            highlightbackground=BORDER_SUBTLE,
         )
         self.canvas.pack()
         self.canvas.bind("<Button-1>", self._on_square_click)
 
-        # Right: controls
-        cf = tk.Frame(main)
+        # Right: controls (card panel)
+        cf = tk.Frame(
+            main, bg=BG_PANEL, padx=14, pady=14,
+            highlightthickness=1, highlightbackground=BORDER_SUBTLE,
+        )
         cf.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self.status_label = tk.Label(cf, text="", font=("Helvetica", 14, "bold"), wraplength=300, justify=tk.LEFT)
-        self.status_label.pack(anchor=tk.W, pady=(0, 10))
+        self.status_label = tk.Label(
+            cf, text="", font=("Helvetica", 14, "bold"), wraplength=300,
+            justify=tk.LEFT, bg=BG_PANEL, fg=FG_TEXT,
+        )
+        self.status_label.pack(anchor=tk.W, pady=(0, 4))
+        self._add_separator(cf)
 
-        tk.Label(cf, text="Enter move (SAN/UCI):", font=("Helvetica", 10)).pack(anchor=tk.W)
-        input_frame = tk.Frame(cf)
+        self._section_label(cf, "Enter move (SAN/UCI):").pack(anchor=tk.W, pady=(0, 2))
+        input_frame = tk.Frame(cf, bg=BG_PANEL)
         input_frame.pack(anchor=tk.W, pady=(0, 10))
-        self.move_entry = tk.Entry(input_frame, font=("Courier", 12), width=15)
+        self.move_entry = tk.Entry(
+            input_frame, font=("Courier", 12), width=15,
+            bg=BG_ENTRY, fg=FG_TEXT, insertbackground=BRIGHT_YELLOW,
+            relief=tk.FLAT, highlightthickness=1,
+            highlightbackground=BORDER_SUBTLE, highlightcolor=MISTRAL_ORANGE,
+        )
         self.move_entry.pack(side=tk.LEFT)
         self.move_entry.bind("<Return>", lambda e: self._on_submit_move())
-        tk.Button(input_frame, text="Play", command=self._on_submit_move, font=("Helvetica", 10)).pack(side=tk.LEFT, padx=(5, 0))
+        tk.Button(
+            input_frame, text="Play", command=self._on_submit_move,
+            font=("Helvetica", 10, "bold"),
+            bg=MISTRAL_ORANGE, fg=MISTRAL_BLACK,
+            activebackground=ORANGE_DEEP, activeforeground=WARM_CREAM,
+            relief=tk.FLAT, padx=10, pady=2, cursor="hand2",
+        ).pack(side=tk.LEFT, padx=(6, 0))
 
         self.ai_button = tk.Button(
             cf, text="AI Move (Mistral Large 4)",
             command=self._trigger_ai_move,
             font=("Helvetica", 11, "bold"),
-            bg="#4A90D9", fg="white", padx=10, pady=5,
+            bg=SUNSHINE_GOLD, fg=MISTRAL_BLACK,
+            activebackground=MISTRAL_ORANGE, activeforeground=MISTRAL_BLACK,
+            relief=tk.FLAT, padx=10, pady=5, cursor="hand2",
         )
         self.ai_button.pack(anchor=tk.W, pady=(0, 10))
 
-        tk.Button(cf, text="New Game", command=self._new_game, font=("Helvetica", 10), padx=10, pady=3).pack(anchor=tk.W, pady=(0, 10))
+        tk.Button(
+            cf, text="New Game", command=self._new_game,
+            font=("Helvetica", 10),
+            bg=BORDER_SUBTLE, fg=FG_TEXT,
+            activebackground="#4a4a4a", activeforeground=FG_TEXT,
+            relief=tk.FLAT, padx=10, pady=3, cursor="hand2",
+        ).pack(anchor=tk.W, pady=(0, 4))
+        self._add_separator(cf)
 
-        tk.Label(cf, text="LLM Screenshot:", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
-        self.shot_label = tk.Label(cf, text="(not yet generated)", font=("Helvetica", 9), fg="gray")
+        self._section_label(cf, "LLM Screenshot:").pack(anchor=tk.W)
+        self.shot_label = tk.Label(
+            cf, text="(not yet generated)", font=("Helvetica", 9),
+            bg=BG_PANEL, fg=FG_MUTED,
+        )
         self.shot_label.pack(anchor=tk.W)
-        self.shot_canvas = tk.Canvas(cf, width=200, height=200, bg="#3C3226", highlightthickness=1)
+        self.shot_canvas = tk.Canvas(
+            cf, width=200, height=200, bg=BG_ENTRY,
+            highlightthickness=1, highlightbackground=BORDER_SUBTLE,
+        )
         self.shot_canvas.pack(anchor=tk.W, pady=(5, 10))
 
-        tk.Label(cf, text="Move History:", font=("Helvetica", 10, "bold")).pack(anchor=tk.W)
-        self.history_text = tk.Text(cf, width=35, height=8, font=("Courier", 10), state=tk.DISABLED)
+        self._section_label(cf, "Move History:").pack(anchor=tk.W)
+        self.history_text = tk.Text(
+            cf, width=35, height=8, font=("Courier", 10), state=tk.DISABLED,
+            bg=BG_ENTRY, fg=FG_TEXT, insertbackground=BRIGHT_YELLOW,
+            relief=tk.FLAT, highlightthickness=1, highlightbackground=BORDER_SUBTLE,
+        )
         self.history_text.pack(anchor=tk.W)
+        self._add_separator(cf)
 
-        self.thinking_label = tk.Label(cf, text="", font=("Helvetica", 10, "italic"), fg="#4A90D9")
-        self.thinking_label.pack(anchor=tk.W, pady=(5, 0))
+        self.thinking_label = tk.Label(
+            cf, text="", font=("Helvetica", 10, "italic"),
+            bg=BG_PANEL, fg=SUNSHINE_GOLD,
+        )
+        self.thinking_label.pack(anchor=tk.W, pady=(0, 2))
 
-        tk.Label(cf, text="AI Thinking:", font=("Helvetica", 10, "bold")).pack(anchor=tk.W, pady=(5, 0))
-        thinking_frame = tk.Frame(cf)
+        self._section_label(cf, "AI Thinking:").pack(anchor=tk.W)
+        thinking_frame = tk.Frame(cf, bg=BG_PANEL)
         thinking_frame.pack(anchor=tk.W, fill=tk.BOTH, expand=True)
         self.thinking_text = tk.Text(
             thinking_frame, width=35, height=10,
             font=("Courier", 9), state=tk.DISABLED,
-            wrap=tk.WORD, bg="#1e1e2e", fg="#cdd6f4",
+            wrap=tk.WORD, bg=BG_ENTRY, fg=FG_TEXT,
+            relief=tk.FLAT, highlightthickness=1, highlightbackground=BORDER_SUBTLE,
         )
-        thinking_scroll = tk.Scrollbar(thinking_frame, command=self.thinking_text.yview)
+        thinking_scroll = tk.Scrollbar(
+            thinking_frame, command=self.thinking_text.yview,
+            bg=BG_PANEL, troughcolor=BG_ENTRY,
+            activebackground=MISTRAL_ORANGE, highlightthickness=0,
+        )
         self.thinking_text.configure(yscrollcommand=thinking_scroll.set)
         thinking_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.thinking_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -322,7 +482,7 @@ class ChessGUI:
     def _apply_human_move(self, move_str: str) -> None:
         success, msg, _ = apply_move(self.state, move_str)
         if not success:
-            self.status_label.config(text=f"Illegal: {msg[:80]}", fg="red")
+            self.status_label.config(text=f"Illegal: {msg[:80]}", fg=MISTRAL_ORANGE)
             return
         self.state = load_state() or self.state
 
@@ -381,7 +541,7 @@ class ChessGUI:
         self.ai_button.config(state=self.tk.NORMAL)
         self.thinking_label.config(text=f"AI played: {move_san}")
 
-        self.shot_label.config(text=f"Saved: {Path(screenshot_path).name}", fg="green")
+        self.shot_label.config(text=f"Saved: {Path(screenshot_path).name}", fg=BRIGHT_YELLOW)
         self._show_screenshot(screenshot_path)
 
         if reasoning:
@@ -394,12 +554,12 @@ class ChessGUI:
 
         if is_game_over(self.state):
             board = self.state.to_board()
-            self.thinking_label.config(text=f"GAME OVER: {game_status(board)}", fg="red")
+            self.thinking_label.config(text=f"GAME OVER: {game_status(board)}", fg=MISTRAL_ORANGE)
 
     def _ai_move_failed(self, error: str) -> None:
         self.ai_thinking = False
         self.ai_button.config(state=self.tk.NORMAL)
-        self.thinking_label.config(text=f"AI Error: {error[:80]}", fg="red")
+        self.thinking_label.config(text=f"AI Error: {error[:80]}", fg=MISTRAL_ORANGE)
         self._set_thinking_text(f"Error: {error}")
 
     def _set_thinking_text(self, text: str) -> None:
@@ -429,11 +589,11 @@ class ChessGUI:
         turn = whose_turn(self.state)
 
         if is_game_over(self.state):
-            self.status_label.config(text=f"GAME OVER\n{status}", fg="red")
+            self.status_label.config(text=f"GAME OVER\n{status}", fg=MISTRAL_ORANGE)
         elif is_ai_turn(self.state):
-            self.status_label.config(text=f"{turn.capitalize()}: Mistral Large 4 (AI)", fg="#4A90D9")
+            self.status_label.config(text=f"{turn.capitalize()}: Mistral Large 4 (AI)", fg=SUNSHINE_GOLD)
         else:
-            self.status_label.config(text=f"{turn.capitalize()}: You (Human)", fg="black")
+            self.status_label.config(text=f"{turn.capitalize()}: You (Human)", fg=FG_TEXT)
 
         self.history_text.config(state=tk.NORMAL)
         self.history_text.delete(1.0, tk.END)
@@ -456,7 +616,7 @@ class ChessGUI:
         self.selected_square = None
         self.legal_targets = set()
         self.shot_canvas.delete("all")
-        self.shot_label.config(text="(not yet generated)", fg="gray")
+        self.shot_label.config(text="(not yet generated)", fg=FG_MUTED)
         self.thinking_label.config(text="")
         self._set_thinking_text("")
         self._draw_board()
