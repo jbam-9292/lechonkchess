@@ -171,12 +171,20 @@ def main() -> None:
             print(f"--- {turn.capitalize()}'s turn (MISTRAL LARGE 4) ---")
             show_ai_view(board, state)
 
-            result = ai.get_move(board, move_history=state.history, verbose=True)
+            result = ai.get_move(
+                board,
+                move_history=state.history,
+                ai_memory=state.ai_memory,
+                verbose=True,
+            )
 
             if result.success and result.move_san:
                 print(f"  AI sees the board and plays: {result.move_san}")
                 success, msg, _ = apply_move(state, result.move_san)
-                if not success:
+                if success:
+                    # Persist the AI's reasoning so it can plan across moves
+                    state.add_ai_memory(result.move_san, result.reasoning, turn)
+                else:
                     print(f"  ERROR applying move: {msg}")
                     # Try to recover
                     legal = get_legal_moves_san(board)

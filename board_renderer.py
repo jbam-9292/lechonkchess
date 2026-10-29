@@ -13,17 +13,26 @@ from pathlib import Path
 import chess
 from PIL import Image, ImageDraw, ImageFont
 
+# ── Mistral brand palette (RGB) ────────────────────────────────────
+
+MISTRAL_ORANGE = (250, 82, 15)     # #fa520f
+ORANGE_DEEP = (204, 58, 5)         # #cc3a05
+SUNSHINE_GOLD = (255, 161, 16)     # #ffa110
+BRIGHT_YELLOW = (255, 217, 0)      # #ffd900
+WARM_CREAM = (255, 248, 224)       # #fff8e0
+MISTRAL_BLACK = (31, 31, 31)       # #1f1f1f
+
 # ── Configuration ──────────────────────────────────────────────────
 
-# Board colors (lichess-style green)
-LIGHT_SQUARE = (240, 217, 181)   # #F0D9B5
-DARK_SQUARE = (181, 136, 99)     # #B58863
-HIGHLIGHT_FROM = (255, 255, 100, 80)   # yellowish overlay for last move source
-HIGHLIGHT_TO = (255, 200, 50, 100)     # orangish overlay for last move target
-COORD_COLOR_LIGHT = (240, 217, 181)
-COORD_COLOR_DARK = (181, 136, 99)
-BORDER_COLOR = (60, 50, 40)
-TEXT_COLOR = (40, 35, 30)
+# Board colors (Mistral theme; dark squares reverted to the original)
+LIGHT_SQUARE = WARM_CREAM                       # #fff8e0
+DARK_SQUARE = (181, 136, 99)                    # #B58863 (original)
+HIGHLIGHT_FROM = (*BRIGHT_YELLOW, 90)           # last-move source wash
+HIGHLIGHT_TO = (*SUNSHINE_GOLD, 120)            # last-move target wash
+COORD_COLOR_LIGHT = WARM_CREAM                  # labels on dark squares
+COORD_COLOR_DARK = (181, 136, 99)               # #B58863, labels on light squares
+BORDER_COLOR = MISTRAL_BLACK                    # image background / frame
+TEXT_COLOR = BRIGHT_YELLOW                      # title text on the frame
 
 # Find a font with chess glyphs
 FONT_CANDIDATES = [
@@ -72,6 +81,87 @@ PIECE_CHARS: dict[chess.PieceType, tuple[str, str]] = {
     chess.KNIGHT: ("♘", "♞"),
     chess.PAWN:   ("♙", "♟"),
 }
+
+# ── Custom piece images ────────────────────────────────────────────
+
+# Drop PNGs into assets/pieces/ to replace the Unicode glyphs.
+# First matching name wins, case-insensitive:
+#   Short:  wK.png wQ.png wR.png wB.png wN.png wP.png  (b... for black)
+#   Long:   white_king.png white_queen.png ... black_pawn.png
+PIECE_IMAGE_DIR = Path(__file__).parent / "assets" / "pieces"
+
+PIECE_IMAGE_NAMES: dict[tuple[bool, chess.PieceType], tuple[str, ...]] = {
+    (chess.WHITE, chess.KING):   ("wK.png", "white_king.png", "w_king.png"),
+    (chess.WHITE, chess.QUEEN):  ("wQ.png", "white_queen.png", "w_queen.png"),
+    (chess.WHITE, chess.ROOK):   ("wR.png", "white_rook.png", "w_rook.png"),
+    (chess.WHITE, chess.BISHOP): ("wB.png", "white_bishop.png", "w_bishop.png"),
+    (chess.WHITE, chess.KNIGHT): ("wN.png", "white_knight.png", "w_knight.png"),
+    (chess.WHITE, chess.PAWN):   ("wP.png", "white_pawn.png", "w_pawn.png"),
+    (chess.BLACK, chess.KING):   ("bK.png", "black_king.png", "b_king.png"),
+    (chess.BLACK, chess.QUEEN):  ("bQ.png", "black_queen.png", "b_queen.png"),
+    (chess.BLACK, chess.ROOK):   ("bR.png", "black_rook.png", "b_rook.png"),
+    (chess.BLACK, chess.BISHOP): ("bB.png", "black_bishop.png", "b_bishop.png"),
+    (chess.BLACK, chess.KNIGHT): ("bN.png", "black_knight.png", "b_knight.png"),
+    (chess.BLACK, chess.PAWN):   ("bP.png", "black_pawn.png", "b_pawn.png"),
+}
+
+# Fraction of the square the piece image may occupy
+PIECE_IMAGE_SCALE = 0.82
+
+_piece_image_cache: dict[tuple[bool, chess.PieceType, int], Image.Image | None] = {}
+
+
+def clear_piece_image_cache() -> None:
+    """Forget loaded piece images (e.g. after swapping PNGs on disk)."""
+    _piece_image_cache.clear()
+
+
+def _find_piece_image_file(color: bool, piece_type: chess.PieceType) -> Path | None:
+    if not PIECE_IMAGE_DIR.is_dir():
+        return None
+    try:
+        existing = {p.name.lower(): p for p in PIECE_IMAGE_DIR.iterdir() if p.is_file()}
+    except OSError:
+        return None
+    for name in PIECE_IMAGE_NAMES.get((color, piece_type), ()):
+        path = existing.get(name.lower())
+        if path is not None:
+            return path
+    return None
+
+
+def load_piece_image(
+    color: bool, piece_type: chess.PieceType, size: int
+) -> Image.Image | None:
+    """Load a custom piece image resized for a square of `size` px.
+
+    Returns None when no PNG is found, so callers fall back to glyphs.
+    Results are cached per (color, piece_type, size).
+    """
+    key = (color, piece_type, size)
+    if key in _piece_image_cache:
+        return _piece_image_cache[key]
+
+    img: Image.Image | None = None
+    path = _find_piece_image_file(color, piece_type)
+    if path is not None:
+        try:
+            raw = Image.open(path).convert("RGBA")
+            target = max(8, int(size * PIECE_IMAGE_SCALE))
+            # Aspect-fit into the target box, upscaling small sources
+            # (Image.thumbnail only shrinks, which left icons tiny).
+            w, h = raw.size
+            scale = target / max(w, h)
+            if scale != 1.0:
+                new_size = (max(1, round(w * scale)), max(1, round(h * scale)))
+                raw = raw.resize(new_size, Image.Resampling.LANCZOS)
+            img = raw
+        except Exception:
+            img = None
+
+    _piece_image_cache[key] = img
+    return img
+
 
 OUTPUT_DIR = Path(__file__).parent / "board_images"
 
@@ -164,18 +254,25 @@ def render_board_image(
             if square in highlights:
                 draw.rectangle([x0, y0, x1, y1], fill=highlights[square])
 
-            # Draw piece
+            # Draw piece (custom PNG if available, Unicode glyph otherwise)
             piece = board.piece_at(square)
             if piece is not None:
-                char = PIECE_CHARS[piece.piece_type][0 if piece.color == chess.WHITE else 1]
-                # Center the piece character in the square
-                bbox = draw.textbbox((0, 0), char, font=piece_font)
-                tw = bbox[2] - bbox[0]
-                th = bbox[3] - bbox[1]
-                tx = x0 + (square_size - tw) // 2 - bbox[0]
-                ty = y0 + (square_size - th) // 2 - bbox[1]
-                # Draw with slight shadow for black pieces visibility
-                draw.text((tx, ty), char, fill=(30, 30, 30), font=piece_font)
+                piece_img = load_piece_image(piece.color, piece.piece_type, square_size)
+                if piece_img is not None:
+                    pw, ph = piece_img.size
+                    px = x0 + (square_size - pw) // 2
+                    py = y0 + (square_size - ph) // 2
+                    img.paste(piece_img, (px, py), piece_img)
+                else:
+                    char = PIECE_CHARS[piece.piece_type][0 if piece.color == chess.WHITE else 1]
+                    # Center the piece character in the square
+                    bbox = draw.textbbox((0, 0), char, font=piece_font)
+                    tw = bbox[2] - bbox[0]
+                    th = bbox[3] - bbox[1]
+                    tx = x0 + (square_size - tw) // 2 - bbox[0]
+                    ty = y0 + (square_size - th) // 2 - bbox[1]
+                    # Draw with slight shadow for black pieces visibility
+                    draw.text((tx, ty), char, fill=MISTRAL_BLACK, font=piece_font)
 
             # Coordinate labels (inside the square, top-left for files, bottom-right for ranks)
             coord_color = DARK_SQUARE if is_light else LIGHT_SQUARE
@@ -188,11 +285,11 @@ def render_board_image(
                 fw = bbox[2] - bbox[0]
                 draw.text((x1 - fw - 3, y1 - coord_font_size - 2), file_char, fill=coord_color, font=coord_font)
 
-    # Outer border
+    # Outer border (brand frame around the board, on the black background)
     draw.rectangle(
         [margin - 2, title_height + margin - 2,
          margin + board_px + 2, title_height + margin + board_px + 2],
-        outline=BORDER_COLOR,
+        outline=SUNSHINE_GOLD,
         width=2,
     )
 

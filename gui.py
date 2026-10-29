@@ -8,13 +8,15 @@ Features:
 - Visual chess board (PNG image, identical to LLM screenshots)
 - Click-to-move: click a piece, then click a destination square
 - SAN/UCI text input as fallback
-- Auto-generates PNG screenshot for the LLM on every AI turn
+- Slider to choose the LLM input mode: text only, image only, or hybrid
+  (in text mode no screenshot is generated; the text board is shown instead)
+- Auto-generates PNG screenshot for the LLM on every AI turn (image/hybrid)
 - Shows the screenshot preview in the GUI
 - Move history panel
 
 Usage:
     export MISTRAL_API_KEY='your-key'
-    uv run python gui.py [--ai-white]
+    uv run python gui.py [--ai-white] [--mode {text,hybrid,image}]
 
 Choose your color in the GUI: "Play as White" or "Play as Black".
 When you play Black the board is shown from Black's perspective.
@@ -39,6 +41,7 @@ from chess_game import (
     is_game_over,
     load_state,
     new_game,
+    render_board,
     whose_turn,
 )
 from board_renderer import board_to_png, save_board_image
@@ -76,7 +79,7 @@ BORDER_SUBTLE = "#3a3a3a"      # card borders / separators
 # Highlight colors (canvas overlays drawn over the board image)
 SELECTED_COLOR = BRIGHT_YELLOW       # selected square
 LEGAL_DOT_COLOR = SUNSHINE_GOLD      # legal move dots
-LAST_MOVE_COLOR = MISTRAL_ORANGE     # last move highlight
+LAST_MOVE_COLOR = MISTRAL_BLACK      # last move outline (visible on cream + orange squares)
 
 # Le Chonk portrait shown in the header (first existing file wins)
 HEADER_IMAGE_SIZE = 72
@@ -98,15 +101,32 @@ LECHONK_IMAGE_CANDIDATES = [
 SCREENSHOT_DIR = Path(__file__).parent / "board_images"
 FILES = "abcdefgh"
 
+# LLM input modes selectable via the slider. Slider positions 0..2 map onto
+# these modes: 0 = text only, 1 = hybrid (text + image), 2 = image only.
+SLIDER_MODES = ("text", "hybrid", "image")
+MODE_SLIDER_INDEX = {mode: i for i, mode in enumerate(SLIDER_MODES)}
+MODE_LABELS = {
+    "text": "Text only",
+    "hybrid": "Hybrid (text + image)",
+    "image": "Image only",
+}
+MODE_THINKING_TEXT = {
+    "text": "Mistral Large 4 is reading the board text...",
+    "hybrid": "Mistral Large 4 is reading the board (text + image)...",
+    "image": "Mistral Large 4 is looking at the board image...",
+}
+
 
 # ── GUI Application ────────────────────────────────────────────────
 
 class ChessGUI:
-    def __init__(self, root, human_color: str = "white"):
+    def __init__(self, root, human_color: str = "white", ai_mode: str = "hybrid"):
         import tkinter as tk
         self.tk = tk
         self.root = root
         self.human_color = human_color if human_color in ("white", "black") else "white"
+        # LLM input mode: "text", "image" or "hybrid" (slider-controlled)
+        self.ai_mode = ai_mode if ai_mode in MODE_LABELS else "hybrid"
         # Show the board from the human's perspective
         self._flip_board = self.human_color == "black"
 
@@ -123,11 +143,12 @@ class ChessGUI:
         self._board_photo = None  # Keep reference to prevent GC
 
         # Setup window
-        self.root.title("LeChonk Chess — Mistral Large 4 (Vision)")
+        self.root.title("LeChonk Chess — Mistral Large 4")
         self.root.configure(bg=BG_ROOT)
         self.root.resizable(False, False)
 
         self._build_ui()
+        self._update_mode_ui()
         self._draw_board()
         self._update_status()
         self._update_color_label()
@@ -169,10 +190,11 @@ class ChessGUI:
             titles, text="LeChonk Chess", font=("Helvetica", 22, "bold"),
             bg=HEADER_BG, fg=BRIGHT_YELLOW,
         ).pack(anchor=tk.W)
-        tk.Label(
-            titles, text="Human vs Mistral Large 4 (Vision)",
+        self.subtitle_label = tk.Label(
+            titles, text="",
             font=("Helvetica", 11), bg=HEADER_BG, fg=FG_MUTED,
-        ).pack(anchor=tk.W)
+        )
+        self.subtitle_label.pack(anchor=tk.W)
 
         # Mistral brand stripe under the header
         tk.Frame(self.root, bg=MISTRAL_ORANGE, height=3).pack(fill=tk.X)
@@ -277,6 +299,33 @@ class ChessGUI:
         )
         self.ai_button.pack(anchor=tk.W, pady=(0, 10))
 
+        self._section_label(cf, "LLM input mode:").pack(anchor=tk.W, pady=(0, 2))
+        mode_frame = tk.Frame(cf, bg=BG_PANEL)
+        mode_frame.pack(anchor=tk.W, pady=(0, 2))
+        self.mode_scale = tk.Scale(
+            mode_frame,
+            from_=0, to=len(SLIDER_MODES) - 1, resolution=1,
+            orient=tk.HORIZONTAL, length=180, showvalue=False,
+            bg=BG_PANEL, fg=FG_TEXT, troughcolor=BG_ENTRY,
+            highlightthickness=0, command=self._on_mode_change,
+        )
+        self.mode_scale.pack(side=tk.LEFT)
+        self.mode_value_label = tk.Label(
+            mode_frame, text="", width=24, anchor=tk.W,
+            font=("Helvetica", 10, "bold"), bg=BG_PANEL, fg=BRIGHT_YELLOW,
+        )
+        self.mode_value_label.pack(side=tk.LEFT, padx=(8, 0))
+        caps = tk.Frame(cf, bg=BG_PANEL)
+        caps.pack(anchor=tk.W, pady=(0, 10))
+        tk.Label(
+            caps, text="Text only", font=("Helvetica", 8),
+            bg=BG_PANEL, fg=FG_MUTED,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            caps, text="Image only", font=("Helvetica", 8),
+            bg=BG_PANEL, fg=FG_MUTED,
+        ).pack(side=tk.RIGHT)
+
         self._section_label(cf, "New game as:").pack(anchor=tk.W, pady=(0, 2))
         new_game_frame = tk.Frame(cf, bg=BG_PANEL)
         new_game_frame.pack(anchor=tk.W, pady=(0, 2))
@@ -301,7 +350,7 @@ class ChessGUI:
         self.color_label.pack(anchor=tk.W, pady=(0, 4))
         self._add_separator(cf)
 
-        self._section_label(cf, "LLM Screenshot:").pack(anchor=tk.W)
+        self._section_label(cf, "LLM input preview:").pack(anchor=tk.W)
         self.shot_label = tk.Label(
             cf, text="(not yet generated)", font=("Helvetica", 9),
             bg=BG_PANEL, fg=FG_MUTED,
@@ -345,6 +394,20 @@ class ChessGUI:
         self.thinking_text.configure(yscrollcommand=thinking_scroll.set)
         thinking_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.thinking_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def _on_mode_change(self, value) -> None:
+        """Slider callback: update the LLM input mode."""
+        idx = int(float(value))
+        if 0 <= idx < len(SLIDER_MODES):
+            self.ai_mode = SLIDER_MODES[idx]
+        self._update_mode_ui()
+
+    def _update_mode_ui(self) -> None:
+        """Sync the slider position, mode label and header subtitle."""
+        self.mode_scale.set(MODE_SLIDER_INDEX[self.ai_mode])
+        label = MODE_LABELS[self.ai_mode]
+        self.mode_value_label.config(text=label)
+        self.subtitle_label.config(text=f"Human vs Mistral Large 4 ({label})")
 
     def _render_board_image(self) -> Image.Image:
         """Render the current board position as a PIL Image."""
@@ -528,7 +591,7 @@ class ChessGUI:
 
         self.ai_thinking = True
         self.ai_button.config(state=self.tk.DISABLED)
-        self.thinking_label.config(text="Mistral Large 4 is looking at the board...")
+        self.thinking_label.config(text=MODE_THINKING_TEXT[self.ai_mode])
         self._set_thinking_text("")
         self.root.update()
 
@@ -540,26 +603,36 @@ class ChessGUI:
             from ai_player import VisionChessAI
 
             board = self.state.to_board()
+            mode = self.ai_mode
 
-            # Generate screenshot for the LLM
-            SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
-            move_num = len(self.state.history) + 1
-            shot_path = SCREENSHOT_DIR / f"position_{move_num:03d}.png"
-            board_to_png(
-                board,
-                shot_path,
-                square_size=SCREENSHOT_SQUARE,
-                last_move=self.state.get_last_move(),
-            )
+            # Generate screenshot for the LLM (not needed in text-only mode)
+            shot_path = None
+            if mode != "text":
+                SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+                move_num = len(self.state.history) + 1
+                shot_path = SCREENSHOT_DIR / f"position_{move_num:03d}.png"
+                board_to_png(
+                    board,
+                    shot_path,
+                    square_size=SCREENSHOT_SQUARE,
+                    last_move=self.state.get_last_move(),
+                )
 
-            # Call the vision AI
+            # Call the LLM in the selected input mode (memory for cross-move planning)
             api_key = os.environ.get("MISTRAL_API_KEY")
-            ai = VisionChessAI(api_key=api_key, model="mistral-large-4")
-            result = ai.get_move(board, move_history=self.state.history, verbose=False)
+            ai = VisionChessAI(api_key=api_key, model="mistral-large-4", mode=mode)
+            result = ai.get_move(
+                board,
+                move_history=self.state.history,
+                ai_memory=self.state.ai_memory,
+                verbose=False,
+            )
 
             if result.success and result.move_san:
                 self.root.after(0, lambda: self._apply_ai_move(
-                    result.move_san, str(shot_path), result.reasoning
+                    result.move_san,
+                    str(shot_path) if shot_path is not None else None,
+                    result.reasoning,
                 ))
             else:
                 self.root.after(0, lambda: self._ai_move_failed(result.error or "Unknown error"))
@@ -567,16 +640,26 @@ class ChessGUI:
         except Exception as e:
             self.root.after(0, lambda: self._ai_move_failed(str(e)))
 
-    def _apply_ai_move(self, move_san: str, screenshot_path: str, reasoning: str | None = None) -> None:
+    def _apply_ai_move(self, move_san: str, screenshot_path: str | None, reasoning: str | None = None) -> None:
         apply_move(self.state, move_san)
+        self.state = load_state() or self.state
+
+        # Persist the AI's reasoning so it can plan across moves
+        side = "white" if self.state.move_count % 2 == 1 else "black"
+        self.state.add_ai_memory(move_san, reasoning, side)
         self.state = load_state() or self.state
 
         self.ai_thinking = False
         self.ai_button.config(state=self.tk.NORMAL)
         self.thinking_label.config(text=f"AI played: {move_san}")
 
-        self.shot_label.config(text=f"Saved: {Path(screenshot_path).name}", fg=BRIGHT_YELLOW)
-        self._show_screenshot(screenshot_path)
+        if screenshot_path is not None:
+            self.shot_label.config(text=f"Saved: {Path(screenshot_path).name}", fg=BRIGHT_YELLOW)
+            self._show_screenshot(screenshot_path)
+        else:
+            # Text-only mode: no image was sent — show the text board instead
+            self.shot_label.config(text="Text mode — no image sent", fg=BRIGHT_YELLOW)
+            self._show_text_board(self.state.to_board())
 
         if reasoning:
             self._set_thinking_text(reasoning)
@@ -615,6 +698,14 @@ class ChessGUI:
             self.shot_canvas.image = photo
         except Exception:
             pass
+
+    def _show_text_board(self, board: chess.Board) -> None:
+        """Show the text board the LLM received (text-only mode) in the preview canvas."""
+        self.shot_canvas.delete("all")
+        self.shot_canvas.create_text(
+            6, 6, text=render_board(board), anchor=self.tk.NW,
+            font=("Courier", 7), fill=FG_TEXT, justify=self.tk.LEFT,
+        )
 
     def _update_status(self) -> None:
         tk = self.tk
@@ -674,6 +765,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="LeChonk Chess GUI")
     parser.add_argument("--ai-white", action="store_true",
                         help="Play as Black (AI plays White); default is playing White")
+    parser.add_argument("--mode", choices=SLIDER_MODES, default="hybrid",
+                        help="LLM input mode at startup (default: hybrid); "
+                             "can be changed anytime with the slider")
     args = parser.parse_args()
 
     if not os.environ.get("MISTRAL_API_KEY"):
@@ -682,7 +776,7 @@ def main() -> None:
         print()
 
     root = tk.Tk()
-    app = ChessGUI(root, human_color="black" if args.ai_white else "white")
+    app = ChessGUI(root, human_color="black" if args.ai_white else "white", ai_mode=args.mode)
     root.mainloop()
 
 

@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from chess_game import (
     GameState,
     apply_move,
-    board_to_text_for_ai,
     display_game,
     format_history,
     game_status,
@@ -188,10 +187,6 @@ def test_board_rendering() -> None:
     history_text = format_history(["e4", "e5", "Nf3"])
     test("History formatting", "1." in history_text and "e4" in history_text)
 
-    ai_view = board_to_text_for_ai(board)
-    test("AI view includes FEN", "FEN:" in ai_view)
-    test("AI view includes legal moves", "Legal moves" in ai_view)
-
 
 def test_board_image_rendering() -> None:
     print("\n--- Board Image Rendering ---")
@@ -287,6 +282,121 @@ def test_ai_move_parsing() -> None:
     test("Reject JSON with illegal move", san is None and uci is None)
 
 
+def test_text_ai_input() -> None:
+    print("\n--- Text AI Input Building (no vision) ---")
+    from ai_player import MODES, TextChessAI, VisionChessAI
+
+    # Subclass relationship: text mode shares parsing/retry logic with vision
+    test("TextChessAI subclasses VisionChessAI", issubclass(TextChessAI, VisionChessAI))
+    test("TextChessAI defaults to text mode", TextChessAI.default_mode == "text")
+    test("TextChessAI uses a text-only system prompt",
+         TextChessAI.system_prompt is not VisionChessAI.system_prompt
+         and "TEXT" in TextChessAI.system_prompt)
+    test("MODES are text/hybrid/image", MODES == ("text", "hybrid", "image"))
+
+    # Build the text-mode input without an API key via a dummy object
+    class DummyTextAI:
+        mode = "text"
+        _build_input = VisionChessAI._build_input
+        _render_board_image = VisionChessAI._render_board_image
+        _encode_image = VisionChessAI._encode_image
+
+    dummy = DummyTextAI()
+    board = chess.Board()
+    board.push_san("e4")
+    board.push_san("e5")
+
+    test("Text mode renders no image", dummy._render_board_image(board, 80) is None)
+
+    memory = [{
+        "move_number": 1,
+        "side": "white",
+        "move_san": "e4",
+        "reasoning": "Controls the center.",
+        "fen": chess.STARTING_FEN,
+    }]
+    inputs = dummy._build_input(
+        board, None, move_history=["e4", "e5"], ai_memory=memory
+    )
+    test("Single user message", len(inputs) == 1 and inputs[0].role == "user")
+    content = inputs[0].content
+    test("No image part in message",
+         all(getattr(c, "type", None) != "input_image" for c in content))
+    full_text = "\n".join(c.text for c in content if hasattr(c, "text"))
+    test("Contains FEN", board.fen() in full_text)
+    test("Contains text board with Unicode pieces", "♜" in full_text and "♙" in full_text)
+    test("Contains side to move", "It is White's turn." in full_text)
+    test("Contains legal moves", "Legal moves:" in full_text and "e4" not in full_text.split("Legal moves:")[1].split("\n")[0])
+    test("Contains move history", "e4 e5" in full_text)
+    test("Contains AI memory block", "MEMORY" in full_text and "Controls the center." in full_text)
+
+    # Move parsing is inherited from the vision player
+    class DummyParser:
+        _parse_move_from_response = TextChessAI._parse_move_from_response
+
+    parser = DummyParser()
+    san, uci, reasoning = parser._parse_move_from_response(
+        '{"move": "Nf3", "reasoning": "Develops."}', board
+    )
+    test("Text AI parses JSON move (inherited)", san == "Nf3" and uci == "g1f3")
+    test("Text AI parses JSON reasoning (inherited)", reasoning == "Develops.")
+
+
+def test_ai_input_modes() -> None:
+    print("\n--- LLM Input Modes (text / image / hybrid) ---")
+    from ai_player import MODE_SYSTEM_PROMPTS, MODES, VisionChessAI
+
+    class DummyAI:
+        _build_input = VisionChessAI._build_input
+        _render_board_image = VisionChessAI._render_board_image
+        _encode_image = VisionChessAI._encode_image
+
+    board = chess.Board()
+
+    # Invalid mode is rejected at construction
+    try:
+        VisionChessAI(api_key="dummy", mode="bogus")
+        test("Invalid mode rejected", False)
+    except ValueError:
+        test("Invalid mode rejected", True)
+
+    # Every mode has a system prompt
+    test("All modes have prompts", all(MODE_SYSTEM_PROMPTS[m] for m in MODES))
+
+    # Image-only mode: image part sent, no FEN/legal moves/board text
+    d = DummyAI()
+    d.mode = "image"
+    test("Image mode renders PNG", d._render_board_image(board, 80) is not None)
+    inputs = d._build_input(board, b"fakepng", move_history=["e4"], ai_memory=[])
+    parts = inputs[0].content
+    txt = "\n".join(c.text for c in parts if getattr(c, "type", None) == "input_text")
+    test("Image mode sends an image part",
+         any(getattr(c, "type", None) == "input_image" for c in parts))
+    test("Image mode omits FEN/legal moves/text board",
+         "FEN:" not in txt and "Legal moves:" not in txt and "♜" not in txt)
+    test("Image mode states side to move", "It is White's turn." in txt)
+
+    # Hybrid mode: image AND full text description
+    d2 = DummyAI()
+    d2.mode = "hybrid"
+    inputs2 = d2._build_input(board, b"fakepng", move_history=["e4"], ai_memory=[])
+    parts2 = inputs2[0].content
+    txt2 = "\n".join(c.text for c in parts2 if getattr(c, "type", None) == "input_text")
+    test("Hybrid sends an image part",
+         any(getattr(c, "type", None) == "input_image" for c in parts2))
+    test("Hybrid includes FEN, legal moves and text board",
+         "FEN:" in txt2 and "Legal moves:" in txt2 and "♜" in txt2)
+
+    # Text mode via constructor default of TextChessAI (no image rendered)
+    from ai_player import TextChessAI
+    ai = TextChessAI(api_key="dummy")
+    test("TextChessAI instance mode is text", ai.mode == "text")
+    test("TextChessAI instance renders no image", ai._render_board_image(board, 80) is None)
+    test("TextChessAI instance uses text prompt", ai.system_prompt is MODE_SYSTEM_PROMPTS["text"])
+    ai_h = VisionChessAI(api_key="dummy", mode="image")
+    test("VisionChessAI image instance uses image prompt", ai_h.system_prompt is MODE_SYSTEM_PROMPTS["image"])
+
+
 def main() -> None:
     print("=" * 50)
     print("  Chess Engine Tests")
@@ -301,6 +411,8 @@ def main() -> None:
     test_board_rendering()
     test_board_image_rendering()
     test_ai_move_parsing()
+    test_text_ai_input()
+    test_ai_input_modes()
 
     print()
     print("=" * 50)

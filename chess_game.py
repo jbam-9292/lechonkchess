@@ -55,10 +55,30 @@ class GameState:
     white_player: str = "human"  # "human" or "ai"
     black_player: str = "ai"
     move_count: int = 0
+    # Persistent AI memory: list of {move_san, reasoning, move_number, side, fen}
+    ai_memory: list[dict] = field(default_factory=list)
 
     def to_board(self) -> chess.Board:
         board = chess.Board(self.board_fen)
         return board
+
+    def add_ai_memory(
+        self,
+        move_san: str,
+        reasoning: str | None,
+        side: str,
+        path: Path = STATE_FILE,
+    ) -> None:
+        """Append the AI's reasoning for a move to persistent memory."""
+        entry = {
+            "move_san": move_san,
+            "reasoning": reasoning or "",
+            "move_number": self.move_count,
+            "side": side,
+            "fen": self.board_fen,
+        }
+        self.ai_memory.append(entry)
+        save_state(self, path)
 
     def get_last_move(self) -> chess.Move | None:
         """Reconstruct the last move from the board position.
@@ -102,6 +122,7 @@ def save_state(state: GameState, path: Path = STATE_FILE) -> None:
         "white_player": state.white_player,
         "black_player": state.black_player,
         "move_count": state.move_count,
+        "ai_memory": state.ai_memory,
     }, indent=2))
 
 
@@ -115,6 +136,7 @@ def load_state(path: Path = STATE_FILE) -> GameState | None:
         white_player=data.get("white_player", "human"),
         black_player=data.get("black_player", "ai"),
         move_count=data.get("move_count", len(data["history"])),
+        ai_memory=data.get("ai_memory", []),
     )
 
 
@@ -329,56 +351,65 @@ def format_history(history: list[str]) -> str:
     return "\n".join(lines)
 
 
-def board_to_text_for_ai(board: chess.Board) -> str:
-    """Produce a compact text representation of the board for the AI to reason about.
+def format_ai_memory(
+    ai_memory: list[dict],
+    *,
+    recent_detail_count: int = 10,
+    recent_reasoning_chars: int = 400,
+    old_reasoning_chars: int = 120,
+) -> str:
+    """Format AI memory entries into a prompt-friendly text block.
 
-    Returns a string with:
-    - ASCII board layout
-    - FEN
-    - Side to move
-    - Castling rights
-    - Legal moves in both SAN and UCI
-    - Move history
+    Recent entries get full reasoning; older entries are truncated to keep
+    the prompt within token limits while preserving the strategic narrative.
     """
-    lines = []
-    lines.append("=== CHESS POSITION ===")
+    if not ai_memory:
+        return ""
+
+    lines: list[str] = []
+    lines.append("=== YOUR PREVIOUS REASONING (MEMORY) ===")
+    lines.append(
+        "This is your memory from earlier moves. Use it to maintain a"
+        " consistent strategy, continue multi-move plans, and adapt when"
+        " the opponent deviates."
+    )
     lines.append("")
 
-    # ASCII board (rank 8 at top)
-    lines.append("Board (rank 8 at top, file a at left):")
-    lines.append("")
-    for rank in range(7, -1, -1):
-        row = f"  {rank + 1} "
-        for file in range(8):
-            sq = chess.square(file, rank)
-            piece = board.piece_at(sq)
-            if piece is None:
-                row += ". "
-            else:
-                # Use piece symbol: uppercase = white, lowercase = black
-                symbol = piece.symbol()
-                row += symbol.upper() + " " if piece.color == chess.WHITE else symbol + " "
-        lines.append(row)
-    lines.append("    a b c d e f g h")
-    lines.append("")
+    split = len(ai_memory) - recent_detail_count
+    if split < 0:
+        split = 0
 
-    lines.append(f"FEN: {board.fen()}")
-    lines.append(f"Side to move: {'White' if board.turn == chess.WHITE else 'Black'}")
-    lines.append(f"Castling rights: {board.fen().split()[2]}")
-    lines.append(f"En passant target: {board.fen().split()[3]}")
-    lines.append("")
+    for i, entry in enumerate(ai_memory):
+        move_num = entry.get("move_number", "?")
+        side = entry.get("side", "?")
+        move_san = entry.get("move_san", "?")
+        reasoning = entry.get("reasoning", "").strip()
 
-    # Legal moves
-    san_moves = get_legal_moves_san(board)
-    uci_moves = get_legal_moves_uci(board)
-    lines.append(f"Legal moves ({len(san_moves)}):")
-    lines.append(f"  SAN: {', '.join(san_moves)}")
-    lines.append(f"  UCI: {', '.join(uci_moves)}")
-    lines.append("")
+        if i >= split:
+            # Recent: full-ish reasoning
+            trunc = recent_reasoning_chars
+        else:
+            # Older: heavily truncated
+            trunc = old_reasoning_chars
 
-    # Status
-    lines.append(f"Status: {game_status(board)}")
+        lines.append(f"Move {move_num} ({side}): played {move_san}")
+        if reasoning:
+            snippet = reasoning[:trunc]
+            if len(reasoning) > trunc:
+                snippet += "..."
+            # Indent multi-line reasoning
+            for rl in snippet.splitlines():
+                lines.append(f"  {rl}")
+        lines.append("")
 
+    if split > 0:
+        lines.insert(
+            4,
+            f"  ... ({split} earlier entries truncated) ...",
+        )
+        lines.insert(5, "")
+
+    lines.append("=== END MEMORY ===")
     return "\n".join(lines)
 
 
