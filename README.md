@@ -9,7 +9,7 @@ can even watch two instances of the AI play each other.
 
 ## Screenshots
 
-[screenshot]
+![screenshot](screenshot_1.png)
 
 [screenshot]
 

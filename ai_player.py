@@ -13,6 +13,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import re
 import sys
 import time
@@ -240,6 +241,8 @@ class VisionChessAI:
         model: str = DEFAULT_MODEL,
         fallback_model: str = FALLBACK_MODEL,
         max_retries: int = 3,
+        backoff_base: float = 1.0,
+        backoff_max: float = 30.0,
         temperature: float = 0.1,
         reasoning_effort: str | None = "low",
         mode: str | None = None,
@@ -257,9 +260,19 @@ class VisionChessAI:
         self.model = model
         self.fallback_model = fallback_model
         self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.backoff_max = backoff_max
         self.temperature = temperature
         self.reasoning_effort = reasoning_effort
         self.client = Mistral(api_key=self.api_key)
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Exponential backoff delay with jitter for the given 1-based attempt.
+
+        delay = min(backoff_max, backoff_base * 2**(attempt-1)) * uniform(0.5, 1.5)
+        """
+        delay = min(self.backoff_max, self.backoff_base * (2 ** (attempt - 1)))
+        return delay * random.uniform(0.5, 1.5)
 
     def _encode_image(self, png_bytes: bytes) -> str:
         """Encode PNG bytes to base64 data URL."""
@@ -571,7 +584,15 @@ class VisionChessAI:
                     if verbose:
                         print(f"  [AI] Error with {model}: {e}", file=sys.stderr)
 
-            time.sleep(1)  # Brief pause before retry
+            if attempt < self.max_retries:
+                delay = self._backoff_delay(attempt)
+                if verbose:
+                    print(
+                        f"  [AI] Backing off {delay:.1f}s before retry "
+                        f"(attempt {attempt + 1}/{self.max_retries})...",
+                        file=sys.stderr,
+                    )
+                time.sleep(delay)
 
         error = last_error or "Unknown error"
         return AIMoveResult(
