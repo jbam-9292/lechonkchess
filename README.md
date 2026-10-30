@@ -1,7 +1,7 @@
 # LeChonk Chess
 
 Play chess against **Mistral Large 4** — except the AI doesn't read the position
-as text. It renders the board as an image and *looks at it* with a vision model,
+as text. It renders the board as an image and *looks at it* as a vision model,
 then picks its move. You can play in a desktop app or in the terminal, and you
 can even watch two instances of the AI play each other.
 
